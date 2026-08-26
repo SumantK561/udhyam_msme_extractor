@@ -3,7 +3,7 @@ import os, time
 from dotenv import load_dotenv
 from udyam_extractor import extract_state, extract_states, format_elapsed, get_run_id, setup_logger
 
-TEST_STATE = "ODISHA"   # Set to None for all States
+TEST_STATE = "TELANGANA"   # Set to None for all States
 MAX_WORKERS = 3
 
 STATES = [
