@@ -32,7 +32,7 @@ def format_elapsed(seconds):
     s = int(seconds); h, r = divmod(s,3600); m, s = divmod(r,60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-def get_run_id(): return datetime.now().strftime("%Y-%m")
+def get_run_id(): return datetime.now().strftime("%Y-%m-%d")
 
 def checkpoint_path(run_id, state):
     p = CHECKPOINT_ROOT / run_id; p.mkdir(parents=True, exist_ok=True)
