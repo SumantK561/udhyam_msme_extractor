@@ -1,1180 +1,138 @@
-import os
-import csv
-import json
-import subprocess
-import logging
-import time
-import random
+# Udyam MSME State-level extractor
+import csv, json, os, random, subprocess, tempfile, time
 from datetime import datetime
-from urllib.parse import urlencode
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
-
-
-# =========================================================
-# ENVIRONMENT
-# =========================================================
-
-load_dotenv()
-
-
-# =========================================================
-# CONFIGURATION
-# =========================================================
-
-API_KEY = os.getenv("UDYAM_API_KEY")
-
-RESOURCE_ID = "8b68ae56-84cf-4728-a0a6-1be11028dea7"
-
-BASE_URL = (
-    f"https://api.data.gov.in/resource/{RESOURCE_ID}"
-)
-
-OUTPUT_ROOT = "output"
-CHECKPOINT_ROOT = "checkpoints"
-
+BASE_URL = "https://api.data.gov.in/resource/8b68ae56-84cf-4728-a0a6-1be11028dea7"
 BATCH_SIZE = 10000
-
 MAX_RETRIES = 5
-
 CONNECT_TIMEOUT = 30
-
 MAX_REQUEST_TIME = 300
+OUTPUT_ROOT = Path("output")
+CHECKPOINT_ROOT = Path("checkpoints")
+LOG_ROOT = Path("logs")
+CSV_HEADERS = ["LG_ST_Code","State","LG_DT_Code","District","Pincode","RegistrationDate","EnterpriseName","CommunicationAddress","Activities"]
 
-RETRY_BASE_SECONDS = 10
-
-
-# =========================================================
-# LOGGER
-# =========================================================
-
-logger = logging.getLogger("udyam")
-
-
-# =========================================================
-# CSV HEADERS
-# =========================================================
-
-CSV_HEADERS = [
-    "LG_ST_Code",
-    "State",
-    "LG_DT_Code",
-    "District",
-    "Pincode",
-    "RegistrationDate",
-    "EnterpriseName",
-    "CommunicationAddress",
-    "Activities"
-]
-
-
-# =========================================================
-# TIME FORMAT
-# =========================================================
+def setup_logger():
+    import logging
+    LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    path = LOG_ROOT / f"udyam_{datetime.now():%Y%m%d_%H%M%S}.log"
+    logger = logging.getLogger("udyam")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(path, encoding="utf-8"); fh.setFormatter(fmt)
+    ch = logging.StreamHandler(); ch.setFormatter(fmt)
+    logger.addHandler(fh); logger.addHandler(ch)
+    logger.log_file = path
+    return logger
 
 def format_elapsed(seconds):
-    """
-    Convert seconds into HH:MM:SS.
-    """
-
-    seconds = int(seconds)
-
-    hours, remainder = divmod(
-        seconds,
-        3600
-    )
-
-    minutes, seconds = divmod(
-        remainder,
-        60
-    )
-
-    return (
-        f"{hours:02d}:"
-        f"{minutes:02d}:"
-        f"{seconds:02d}"
-    )
-
-
-# =========================================================
-# MONTH / RUN DIRECTORIES
-# =========================================================
-
-def get_output_dir(run_id):
-
-    directory = os.path.join(
-        OUTPUT_ROOT,
-        run_id
-    )
-
-    os.makedirs(
-        directory,
-        exist_ok=True
-    )
-
-    return directory
-
-
-def get_checkpoint_dir(run_id):
-
-    directory = os.path.join(
-        CHECKPOINT_ROOT,
-        run_id
-    )
-
-    os.makedirs(
-        directory,
-        exist_ok=True
-    )
-
-    return directory
-
-
-# =========================================================
-# FILE PATHS
-# =========================================================
-
-def get_output_file(
-    run_id,
-    state,
-    district
-):
-
-    output_dir = get_output_dir(
-        run_id
-    )
-
-    return os.path.join(
-        output_dir,
-        f"udyam_msme_{state}_{district}.csv"
-    )
-
-
-def get_checkpoint_file(
-    run_id,
-    state,
-    district
-):
-
-    checkpoint_dir = get_checkpoint_dir(
-        run_id
-    )
-
-    return os.path.join(
-        checkpoint_dir,
-        f"{state}_{district}.json"
-    )
-
-
-# =========================================================
-# CHECKPOINT
-# =========================================================
-
-def load_checkpoint(
-    run_id,
-    state,
-    district
-):
-
-    checkpoint_file = get_checkpoint_file(
-        run_id,
-        state,
-        district
-    )
-
-    if not os.path.exists(
-        checkpoint_file
-    ):
-        return None
-
-    try:
-
-        with open(
-            checkpoint_file,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            checkpoint = json.load(
-                file
-            )
-
-        # Extra safety: checkpoint must belong
-        # to the current monthly run.
-        if checkpoint.get(
-            "run_id"
-        ) != run_id:
-
-            logger.warning(
-                "Checkpoint run_id mismatch | "
-                "Expected=%s | Found=%s",
-                run_id,
-                checkpoint.get("run_id")
-            )
-
-            return None
-
-        return checkpoint
-
-    except Exception:
-
-        logger.exception(
-            "Failed to read checkpoint | "
-            "Run=%s | "
-            "State=%s | "
-            "District=%s",
-            run_id,
-            state,
-            district
-        )
-
-        return None
-
-
-def save_checkpoint(
-    run_id,
-    state,
-    district,
-    total_records,
-    records_written,
-    last_completed_offset,
-    status
-):
-
-    checkpoint_file = get_checkpoint_file(
-        run_id,
-        state,
-        district
-    )
-
-    checkpoint = {
-        "run_id": run_id,
-        "state": state,
-        "district": district,
-        "total_records": total_records,
-        "records_written": records_written,
-        "last_completed_offset": last_completed_offset,
-        "status": status,
-        "updated_at": datetime.now().isoformat()
-    }
-
-    temp_file = (
-        checkpoint_file + ".tmp"
-    )
-
-    try:
-
-        with open(
-            temp_file,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                checkpoint,
-                file,
-                indent=4
-            )
-
-        # Atomic replacement
-        os.replace(
-            temp_file,
-            checkpoint_file
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Failed to save checkpoint | "
-            "Run=%s | "
-            "State=%s | "
-            "District=%s",
-            run_id,
-            state,
-            district
-        )
-
-        if os.path.exists(
-            temp_file
-        ):
-
-            try:
-                os.remove(
-                    temp_file
-                )
-            except OSError:
-                pass
-
-        raise
-
-
-# =========================================================
-# API URL
-# =========================================================
-
-def build_api_url(
-    state,
-    district,
-    offset,
-    limit
-):
-
-    params = {
-        "api-key": API_KEY,
-        "format": "json",
-        "offset": offset,
-        "limit": limit,
-        "filters[State]": state,
-        "filters[District]": district
-    }
-
-    return (
-        BASE_URL
-        + "?"
-        + urlencode(params)
-    )
-
-
-# =========================================================
-# API REQUEST
-# =========================================================
-
-def get_udyam_data(
-    state,
-    district,
-    offset=0,
-    limit=BATCH_SIZE
-):
-
-    if not API_KEY:
-
-        logger.error(
-            "UDYAM_API_KEY is not configured."
-        )
-
-        return None
-
-    url = build_api_url(
-        state,
-        district,
-        offset,
-        limit
-    )
-
-    for attempt in range(
-        1,
-        MAX_RETRIES + 1
-    ):
-
-        logger.info(
-            "API REQUEST | "
-            "State=%s | "
-            "District=%s | "
-            "Offset=%s | "
-            "Limit=%s | "
-            "Attempt=%s/%s",
-            state,
-            district,
-            offset,
-            limit,
-            attempt,
-            MAX_RETRIES
-        )
-
-        command = [
-            "curl.exe",
-            "-s",
-            "--connect-timeout",
-            str(CONNECT_TIMEOUT),
-            "--max-time",
-            str(MAX_REQUEST_TIME),
-            "-H",
-            "accept: application/json",
-            url
-        ]
-
+    s = int(seconds); h, r = divmod(s,3600); m, s = divmod(r,60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+def get_run_id(): return datetime.now().strftime("%Y-%m")
+
+def checkpoint_path(run_id, state):
+    p = CHECKPOINT_ROOT / run_id; p.mkdir(parents=True, exist_ok=True)
+    return p / f"{state}.json"
+
+def output_path(run_id, state):
+    p = OUTPUT_ROOT / run_id; p.mkdir(parents=True, exist_ok=True)
+    return p / f"udyam_msme_{state}.csv"
+
+def load_checkpoint(run_id, state):
+    p = checkpoint_path(run_id,state)
+    if p.exists():
+        try: return json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError,OSError): pass
+    return {"run_id":run_id,"state":state,"total_records":None,"records_written":0,"last_completed_offset":0,"status":"NOT_STARTED"}
+
+def save_checkpoint(run_id,state,cp):
+    cp["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    p=checkpoint_path(run_id,state); tmp=p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cp,indent=4),encoding="utf-8"); tmp.replace(p)
+
+def fetch_batch(api_key,state,offset,logger):
+    from urllib.parse import quote
+    url=(f"{BASE_URL}?api-key={quote(api_key)}&format=json&offset={offset}"
+         f"&limit={BATCH_SIZE}&filters%5BState%5D={quote(state)}")
+    for attempt in range(1,MAX_RETRIES+1):
+        temp_path=None; started=time.perf_counter()
         try:
-
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace"
-            )
-
-            # -------------------------------------------------
-            # SUCCESS
-            # -------------------------------------------------
-
-            if result.returncode == 0:
-
-                try:
-
-                    data = json.loads(
-                        result.stdout
-                    )
-
-                except json.JSONDecodeError:
-
-                    logger.warning(
-                        "Invalid JSON response | "
-                        "State=%s | "
-                        "District=%s | "
-                        "Offset=%s | "
-                        "Attempt=%s/%s",
-                        state,
-                        district,
-                        offset,
-                        attempt,
-                        MAX_RETRIES
-                    )
-
-                    continue
-
-                records = data.get(
-                    "records",
-                    []
-                )
-
-                logger.info(
-                    "API SUCCESS | "
-                    "State=%s | "
-                    "District=%s | "
-                    "Offset=%s | "
-                    "Records=%s",
-                    state,
-                    district,
-                    offset,
-                    len(records)
-                )
-
-                return data
-
-            # -------------------------------------------------
-            # TIMEOUT
-            # -------------------------------------------------
-
-            if result.returncode == 28:
-
-                logger.warning(
-                    "API TIMEOUT | "
-                    "State=%s | "
-                    "District=%s | "
-                    "Offset=%s | "
-                    "Attempt=%s/%s",
-                    state,
-                    district,
-                    offset,
-                    attempt,
-                    MAX_RETRIES
-                )
-
+            with tempfile.NamedTemporaryFile(delete=False,suffix=".json") as f: temp_path=f.name
+            cmd=["curl.exe","-sS","-L","--connect-timeout",str(CONNECT_TIMEOUT),
+                 "--max-time",str(MAX_REQUEST_TIME),"-H","accept: application/json",
+                 "-o",temp_path,url]
+            result=subprocess.run(cmd,capture_output=True,text=True,encoding="utf-8",errors="replace")
+            elapsed=time.perf_counter()-started
+            if result.returncode:
+                logger.error("CURL FAILURE | State=%s | Offset=%s | ReturnCode=%s | Elapsed=%s | Error=%s",
+                             state,offset,result.returncode,format_elapsed(elapsed),result.stderr.strip())
             else:
-
-                logger.warning(
-                    "CURL FAILURE | "
-                    "ReturnCode=%s | "
-                    "State=%s | "
-                    "District=%s | "
-                    "Offset=%s | "
-                    "Attempt=%s/%s",
-                    result.returncode,
-                    state,
-                    district,
-                    offset,
-                    attempt,
-                    MAX_RETRIES
-                )
-
-                if result.stderr:
-
-                    logger.warning(
-                        "curl stderr: %s",
-                        result.stderr.strip()
-                    )
-
-        except Exception:
-
-            logger.exception(
-                "Unexpected API exception | "
-                "State=%s | "
-                "District=%s | "
-                "Offset=%s | "
-                "Attempt=%s/%s",
-                state,
-                district,
-                offset,
-                attempt,
-                MAX_RETRIES
-            )
-
-        # -----------------------------------------------------
-        # RETRY
-        # -----------------------------------------------------
-
+                try:
+                    data=json.loads(Path(temp_path).read_text(encoding="utf-8"))
+                    if data.get("status") == "ok":
+                        logger.info("API RESPONSE | State=%s | Offset=%s | Count=%s | Total=%s | Elapsed=%s",
+                                    state,offset,data.get("count",0),data.get("total"),format_elapsed(elapsed))
+                        return data
+                    logger.error("API ERROR | State=%s | Offset=%s | Response=%s",state,offset,json.dumps(data)[:1000])
+                except (json.JSONDecodeError,OSError) as exc:
+                    logger.error("INVALID API RESPONSE | State=%s | Offset=%s | Error=%s",state,offset,exc)
+        finally:
+            if temp_path:
+                try: os.remove(temp_path)
+                except OSError: pass
         if attempt < MAX_RETRIES:
-
-            backoff = (
-                RETRY_BASE_SECONDS
-                * (2 ** (attempt - 1))
-            )
-
-            jitter = random.uniform(
-                0,
-                5
-            )
-
-            wait_seconds = (
-                backoff + jitter
-            )
-
-            logger.info(
-                "RETRY WAIT | "
-                "State=%s | "
-                "District=%s | "
-                "Offset=%s | "
-                "Wait=%.1f seconds",
-                state,
-                district,
-                offset,
-                wait_seconds
-            )
-
-            time.sleep(
-                wait_seconds
-            )
-
-    logger.error(
-        "API FAILED AFTER RETRIES | "
-        "State=%s | "
-        "District=%s | "
-        "Offset=%s",
-        state,
-        district,
-        offset
-    )
-
+            delay=min(60,5*(2**(attempt-1)))+random.uniform(0,3)
+            logger.warning("RETRYING | State=%s | Offset=%s | RetryIn=%.1f seconds",state,offset,delay)
+            time.sleep(delay)
+    logger.error("API REQUEST FAILED AFTER RETRIES | State=%s | Offset=%s",state,offset)
     return None
 
-
-# =========================================================
-# CSV WRITER
-# =========================================================
-
-def write_batch_to_csv(
-    records,
-    output_file,
-    write_header=False
-):
-
-    if not records:
-
-        return 0
-
-    with open(
-        output_file,
-        "a",
-        newline="",
-        encoding="utf-8-sig"
-    ) as file:
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=CSV_HEADERS,
-            extrasaction="ignore"
-        )
-
-        if write_header:
-
-            writer.writeheader()
-
-        writer.writerows(
-            records
-        )
-
+def append_records(path,records):
+    exists=path.exists() and path.stat().st_size>0
+    with path.open("a",newline="",encoding="utf-8-sig") as f:
+        w=csv.DictWriter(f,fieldnames=CSV_HEADERS,extrasaction="ignore")
+        if not exists: w.writeheader()
+        for r in records: w.writerow({h:r.get(h,"") for h in CSV_HEADERS})
     return len(records)
 
-
-# =========================================================
-# EXTRACT ONE DISTRICT
-# =========================================================
-
-def extract_district(
-    run_id,
-    state,
-    district
-):
-
-    start_time = time.perf_counter()
-
-    logger.info("=" * 90)
-
-    logger.info(
-        "DISTRICT STARTED | "
-        "Run=%s | "
-        "State=%s | "
-        "District=%s",
-        run_id,
-        state,
-        district
-    )
-
-    logger.info("=" * 90)
-
-    output_file = get_output_file(
-        run_id,
-        state,
-        district
-    )
-
-    checkpoint = load_checkpoint(
-        run_id,
-        state,
-        district
-    )
-
-    # =====================================================
-    # ALREADY COMPLETED THIS MONTH
-    # =====================================================
-
-    if checkpoint:
-
-        if checkpoint.get(
-            "status"
-        ) == "COMPLETED":
-
-            elapsed = (
-                time.perf_counter()
-                - start_time
-            )
-
-            logger.info(
-                "DISTRICT SKIPPED | "
-                "Run=%s | "
-                "State=%s | "
-                "District=%s | "
-                "Reason=COMPLETED_THIS_RUN | "
-                "Records=%s",
-                run_id,
-                state,
-                district,
-                checkpoint.get(
-                    "records_written",
-                    0
-                )
-            )
-
-            return {
-                "state": state,
-                "district": district,
-                "status": "SKIPPED",
-                "records": checkpoint.get(
-                    "records_written",
-                    0
-                ),
-                "elapsed": elapsed
-            }
-
-    # =====================================================
-    # RESUME INFORMATION
-    # =====================================================
-
-    offset = 0
-    total_written = 0
-    total = 0
-
-    if checkpoint:
-
-        offset = checkpoint.get(
-            "last_completed_offset",
-            0
-        )
-
-        total_written = checkpoint.get(
-            "records_written",
-            0
-        )
-
-        total = checkpoint.get(
-            "total_records",
-            0
-        )
-
-        logger.info(
-            "RESUME | "
-            "Run=%s | "
-            "State=%s | "
-            "District=%s | "
-            "Offset=%s | "
-            "Records=%s | "
-            "Total=%s",
-            run_id,
-            state,
-            district,
-            offset,
-            total_written,
-            total
-        )
-
-        # If checkpoint exists but CSV is gone,
-        # restart safely.
-        if not os.path.exists(
-            output_file
-        ):
-
-            logger.warning(
-                "Checkpoint exists but CSV is missing. "
-                "Restarting district from offset 0."
-            )
-
-            offset = 0
-            total_written = 0
-            total = 0
-
-    else:
-
-        # New monthly run, no checkpoint.
-        #
-        # If a CSV somehow exists without a checkpoint,
-        # don't append to potentially stale data.
-        if os.path.exists(
-            output_file
-        ):
-
-            logger.warning(
-                "CSV exists without checkpoint. "
-                "Removing stale CSV."
-            )
-
-            os.remove(
-                output_file
-            )
-
-    # =====================================================
-    # FIRST / RESUME API REQUEST
-    # =====================================================
-
-    data = get_udyam_data(
-        state=state,
-        district=district,
-        offset=offset,
-        limit=BATCH_SIZE
-    )
-
-    if not data:
-
-        elapsed = (
-            time.perf_counter()
-            - start_time
-        )
-
-        logger.error(
-            "DISTRICT FAILED | "
-            "Run=%s | "
-            "State=%s | "
-            "District=%s | "
-            "Offset=%s | "
-            "Elapsed=%s",
-            run_id,
-            state,
-            district,
-            offset,
-            format_elapsed(elapsed)
-        )
-
-        save_checkpoint(
-            run_id,
-            state,
-            district,
-            total,
-            total_written,
-            offset,
-            "FAILED"
-        )
-
-        return {
-            "state": state,
-            "district": district,
-            "status": "FAILED",
-            "records": total_written,
-            "elapsed": elapsed
-        }
-
-    # =====================================================
-    # TOTAL RECORD COUNT
-    # =====================================================
-
-    if total == 0:
-
-        try:
-
-            total = int(
-                data.get(
-                    "total",
-                    0
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError
-        ):
-
-            total = 0
-
-        logger.info(
-            "TOTAL RECORDS | "
-            "Run=%s | "
-            "State=%s | "
-            "District=%s | "
-            "Total=%s",
-            run_id,
-            state,
-            district,
-            total
-        )
-
-    # =====================================================
-    # ZERO RECORD DISTRICT
-    # =====================================================
-
-    if total == 0:
-
-        elapsed = (
-            time.perf_counter()
-            - start_time
-        )
-
-        save_checkpoint(
-            run_id,
-            state,
-            district,
-            0,
-            0,
-            0,
-            "COMPLETED"
-        )
-
-        logger.info(
-            "DISTRICT COMPLETED | "
-            "State=%s | "
-            "District=%s | "
-            "Records=0 | "
-            "Elapsed=%s",
-            state,
-            district,
-            format_elapsed(elapsed)
-        )
-
-        return {
-            "state": state,
-            "district": district,
-            "status": "SUCCESS",
-            "records": 0,
-            "elapsed": elapsed
-        }
-
-    # =====================================================
-    # PAGINATION
-    # =====================================================
-
-    batch_number = (
-        (offset // BATCH_SIZE)
-        + 1
-    )
-
-    while offset < total:
-
-        batch_start = time.perf_counter()
-
-        records = data.get(
-            "records",
-            []
-        )
-
+def extract_state(api_key,state,run_id,logger):
+    started=time.perf_counter(); cp=load_checkpoint(run_id,state); out=output_path(run_id,state)
+    if cp.get("status")=="COMPLETED":
+        logger.info("STATE SKIPPED | State=%s | Status=COMPLETED | Records=%s",state,cp.get("records_written",0)); return cp
+    offset=int(cp.get("last_completed_offset",0)); written=int(cp.get("records_written",0)); total=cp.get("total_records")
+    if offset and not out.exists(): offset=written=0; total=None
+    cp.update({"run_id":run_id,"state":state,"status":"IN_PROGRESS","last_completed_offset":offset,"records_written":written,"total_records":total}); save_checkpoint(run_id,state,cp)
+    logger.info("="*80); logger.info("STATE STARTED | State=%s | RunID=%s | ResumeOffset=%s",state,run_id,offset); logger.info("="*80)
+    while True:
+        batch_start=time.perf_counter(); data=fetch_batch(api_key,state,offset,logger)
+        if data is None:
+            cp.update({"status":"FAILED","last_completed_offset":offset,"records_written":written,"total_records":total}); save_checkpoint(run_id,state,cp)
+            logger.error("STATE FAILED | State=%s | RecordsWritten=%s | LastCompletedOffset=%s | Elapsed=%s",state,written,offset,format_elapsed(time.perf_counter()-started)); return cp
+        if total is None: total=int(data.get("total") or 0)
+        records=data.get("records") or []; count=len(records)
         if not records:
+            cp.update({"status":"COMPLETED","total_records":total,"records_written":written,"last_completed_offset":offset}); save_checkpoint(run_id,state,cp)
+            logger.info("STATE COMPLETED | State=%s | Records=%s | Elapsed=%s",state,written,format_elapsed(time.perf_counter()-started)); return cp
+        n=append_records(out,records); written+=n; offset+=n
+        cp.update({"total_records":total,"records_written":written,"last_completed_offset":offset,"status":"IN_PROGRESS"}); save_checkpoint(run_id,state,cp)
+        logger.info("BATCH COMPLETE | State=%s | BatchRecords=%s | Progress=%s/%s | Offset=%s | BatchElapsed=%s",state,n,written,total,offset,format_elapsed(time.perf_counter()-batch_start))
+        if (total and written>=total) or count<BATCH_SIZE:
+            cp["status"]="COMPLETED"; save_checkpoint(run_id,state,cp)
+            logger.info("STATE COMPLETED | State=%s | Records=%s | Elapsed=%s",state,written,format_elapsed(time.perf_counter()-started)); return cp
 
-            elapsed = (
-                time.perf_counter()
-                - start_time
-            )
-
-            logger.error(
-                "EMPTY BATCH | "
-                "State=%s | "
-                "District=%s | "
-                "Offset=%s",
-                state,
-                district,
-                offset
-            )
-
-            save_checkpoint(
-                run_id,
-                state,
-                district,
-                total,
-                total_written,
-                offset,
-                "FAILED"
-            )
-
-            return {
-                "state": state,
-                "district": district,
-                "status": "FAILED",
-                "records": total_written,
-                "elapsed": elapsed
-            }
-
-        # -------------------------------------------------
-        # WRITE CSV
-        # -------------------------------------------------
-
-        write_header = (
-            offset == 0
-        )
-
-        records_in_batch = write_batch_to_csv(
-            records,
-            output_file,
-            write_header
-        )
-
-        total_written += records_in_batch
-
-        offset += records_in_batch
-
-        batch_elapsed = (
-            time.perf_counter()
-            - batch_start
-        )
-
-        logger.info(
-            "BATCH COMPLETE | "
-            "State=%s | "
-            "District=%s | "
-            "Batch=%s | "
-            "BatchRecords=%s | "
-            "Progress=%s/%s | "
-            "BatchElapsed=%s",
-            state,
-            district,
-            batch_number,
-            records_in_batch,
-            total_written,
-            total,
-            format_elapsed(batch_elapsed)
-        )
-
-        # -------------------------------------------------
-        # CHECKPOINT AFTER CSV WRITE
-        # -------------------------------------------------
-
-        save_checkpoint(
-            run_id,
-            state,
-            district,
-            total,
-            total_written,
-            offset,
-            "IN_PROGRESS"
-        )
-
-        # -------------------------------------------------
-        # SAFETY
-        # -------------------------------------------------
-
-        if records_in_batch <= 0:
-
-            elapsed = (
-                time.perf_counter()
-                - start_time
-            )
-
-            logger.error(
-                "ZERO RECORD BATCH | "
-                "State=%s | "
-                "District=%s | "
-                "Offset=%s",
-                state,
-                district,
-                offset
-            )
-
-            save_checkpoint(
-                run_id,
-                state,
-                district,
-                total,
-                total_written,
-                offset,
-                "FAILED"
-            )
-
-            return {
-                "state": state,
-                "district": district,
-                "status": "FAILED",
-                "records": total_written,
-                "elapsed": elapsed
-            }
-
-        # -------------------------------------------------
-        # NEXT BATCH
-        # -------------------------------------------------
-
-        if offset < total:
-
-            batch_number += 1
-
-            data = get_udyam_data(
-                state=state,
-                district=district,
-                offset=offset,
-                limit=BATCH_SIZE
-            )
-
-            if not data:
-
-                elapsed = (
-                    time.perf_counter()
-                    - start_time
-                )
-
-                logger.error(
-                    "NEXT BATCH FAILED | "
-                    "State=%s | "
-                    "District=%s | "
-                    "Offset=%s | "
-                    "Elapsed=%s",
-                    state,
-                    district,
-                    offset,
-                    format_elapsed(elapsed)
-                )
-
-                save_checkpoint(
-                    run_id,
-                    state,
-                    district,
-                    total,
-                    total_written,
-                    offset,
-                    "FAILED"
-                )
-
-                return {
-                    "state": state,
-                    "district": district,
-                    "status": "FAILED",
-                    "records": total_written,
-                    "elapsed": elapsed
-                }
-
-    # =====================================================
-    # FINAL VALIDATION
-    # =====================================================
-
-    elapsed = (
-        time.perf_counter()
-        - start_time
-    )
-
-    logger.info(
-        "VALIDATION | "
-        "State=%s | "
-        "District=%s | "
-        "Expected=%s | "
-        "Written=%s",
-        state,
-        district,
-        total,
-        total_written
-    )
-
-    # -----------------------------------------------------
-    # SUCCESS
-    # -----------------------------------------------------
-
-    if total_written == total:
-
-        save_checkpoint(
-            run_id,
-            state,
-            district,
-            total,
-            total_written,
-            offset,
-            "COMPLETED"
-        )
-
-        logger.info(
-            "DISTRICT COMPLETED | "
-            "Run=%s | "
-            "State=%s | "
-            "District=%s | "
-            "Records=%s | "
-            "Elapsed=%s",
-            run_id,
-            state,
-            district,
-            total_written,
-            format_elapsed(elapsed)
-        )
-
-        return {
-            "state": state,
-            "district": district,
-            "status": "SUCCESS",
-            "records": total_written,
-            "elapsed": elapsed
-        }
-
-    # -----------------------------------------------------
-    # COUNT MISMATCH
-    # -----------------------------------------------------
-
-    logger.error(
-        "RECORD COUNT MISMATCH | "
-        "State=%s | "
-        "District=%s | "
-        "Expected=%s | "
-        "Written=%s | "
-        "Elapsed=%s",
-        state,
-        district,
-        total,
-        total_written,
-        format_elapsed(elapsed)
-    )
-
-    save_checkpoint(
-        run_id,
-        state,
-        district,
-        total,
-        total_written,
-        offset,
-        "FAILED"
-    )
-
-    return {
-        "state": state,
-        "district": district,
-        "status": "FAILED",
-        "records": total_written,
-        "elapsed": elapsed
-    }
-
-
-# =========================================================
-# MODULE ENTRY
-# =========================================================
-
-if __name__ == "__main__":
-
-    print(
-        "Run this module using run_udyam.py"
-    )
+def extract_states(api_key,states,run_id,logger,max_workers=3):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results=[]
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures={ex.submit(extract_state,api_key,s,run_id,logger):s for s in states}
+        for f in as_completed(futures):
+            state=futures[f]
+            try: results.append(f.result())
+            except Exception as exc:
+                logger.exception("UNHANDLED STATE ERROR | State=%s | Error=%s",state,exc)
+                results.append({"state":state,"status":"FAILED","records_written":0})
+    return results
