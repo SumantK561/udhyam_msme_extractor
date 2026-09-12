@@ -1,6 +1,7 @@
 # Udyam MSME State-level extractor
 import csv, json, os, random, subprocess, tempfile, time
-from datetime import datetime
+from datetime import datetime, timezone
+from uuid import uuid4
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,7 +33,24 @@ def format_elapsed(seconds):
     s = int(seconds); h, r = divmod(s,3600); m, s = divmod(r,60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-def get_run_id(): return datetime.now().strftime("%Y-%m-%d")
+def get_run_id(existing_run_id: Optional[str] = None) -> str:
+    """
+    Return an existing run ID for resume/retry scenarios,
+    otherwise generate a new unique UTC run ID.
+
+    Format:
+        YYYYMMDDTHHMMSSZ_<8-char-uuid>
+
+    Example:
+        20260912T061530Z_a81f92c4
+    """
+    if existing_run_id:
+        return existing_run_id.strip()
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    unique_id = uuid4().hex[:8]
+
+    return f"{timestamp}_{unique_id}"
 
 def checkpoint_path(run_id, state):
     p = CHECKPOINT_ROOT / run_id; p.mkdir(parents=True, exist_ok=True)
