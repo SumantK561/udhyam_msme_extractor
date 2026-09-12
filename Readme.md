@@ -2,7 +2,7 @@
 
 Version
 
-1.5.0**
+**1.5.0**
 
 Python-based data extraction pipeline for retrieving MSME registered-unit data from the Government of India's Udyam dataset through the `data.gov.in` API.
 
@@ -78,7 +78,7 @@ The pipeline extracts data at the **State → District** level, handles API pagi
 
 ---
 
-**## Project Structure
+**## Project Structure**
 
 Current production-oriented structure:
 
@@ -110,7 +110,7 @@ Udyam_MSME/
 
 output/, checkpoints/, and logs/ are runtime artifacts and should not be committed to Git.
 
----**
+**---**
 
 ## Requirements
 
@@ -582,7 +582,7 @@ Previously written records do not need to be retrieved again.
 
 ---
 
-**## Run Identity
+**## Run Identity**
 
 Every execution receives a unique run ID.
 
@@ -631,9 +631,9 @@ Recovery trusts a batch only when both its successful manifest entry and physica
 
 If an orphaned batch artifact exists without a manifest entry, the extractor fails closed rather than overwriting it.
 
----**
+**---**
 
-**## Output
+**## Output**
 
 The extractor produces one CSV artifact per API batch.
 
@@ -647,7 +647,7 @@ Example:
 
 This batch-oriented layout provides independently recoverable artifacts suitable for later raw-storage and warehouse loading.
 
----**
+**---**
 
 ## CSV Columns
 
