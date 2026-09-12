@@ -52,6 +52,15 @@ def get_run_id(existing_run_id: Optional[str] = None) -> str:
 
     return f"{timestamp}_{unique_id}"
 
+def get_batch_id(run_id: str, state: str, offset: int) -> str:
+    """
+    Generate a deterministic identifier for an extraction batch.
+
+    A batch is uniquely identified by:
+        run_id + state + offset
+    """
+    return f"{run_id}_{state}_{offset}"
+
 def checkpoint_path(run_id, state):
     p = CHECKPOINT_ROOT / run_id; p.mkdir(parents=True, exist_ok=True)
     return p / f"{state}.json"
