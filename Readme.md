@@ -110,7 +110,7 @@ Udyam_MSME/
 
 output/, checkpoints/, and logs/ are runtime artifacts and should not be committed to Git.
 
-**---**
+---
 
 ## Requirements
 
@@ -631,7 +631,7 @@ Recovery trusts a batch only when both its successful manifest entry and physica
 
 If an orphaned batch artifact exists without a manifest entry, the extractor fails closed rather than overwriting it.
 
-**---**
+---
 
 **## Output**
 
@@ -647,7 +647,7 @@ Example:
 
 This batch-oriented layout provides independently recoverable artifacts suitable for later raw-storage and warehouse loading.
 
-**---**
+---
 
 ## CSV Columns
 
