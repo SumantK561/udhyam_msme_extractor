@@ -568,6 +568,18 @@ def fetch_batch(
 
                     if data.get("status") == "ok":
 
+                        records = (
+                            data.get("records")
+                            or []
+                        )
+
+                        count = len(records)
+
+                        total = int(
+                            data.get("total")
+                            or 0
+                        )
+
                         logger.info(
                             "API RESPONSE | "
                             "State=%s | "
@@ -577,17 +589,43 @@ def fetch_batch(
                             "Elapsed=%s",
                             state,
                             offset,
-                            data.get(
-                                "count",
-                                0,
-                            ),
-                            data.get(
-                                "total"
-                            ),
+                            count,
+                            total,
                             format_elapsed(
                                 elapsed
                             ),
                         )
+
+                        # -------------------------------------------------------------------
+                        # Short-page protection
+                        # -------------------------------------------------------------------
+                        #
+                        # A page smaller than BATCH_SIZE is only valid when it
+                        # reaches the end of the dataset. If more records remain,
+                        # retry the exact same offset instead of advancing.
+                        # -------------------------------------------------------------------
+
+                        if (
+                            count < BATCH_SIZE
+                            and offset + count < total
+                        ):
+
+                            logger.warning(
+                                "SHORT API PAGE | "
+                                "State=%s | "
+                                "Offset=%s | "
+                                "Count=%s | "
+                                "Total=%s | "
+                                "ExpectedAtLeast=%s | "
+                                "RetryingSameOffset",
+                                state,
+                                offset,
+                                count,
+                                total,
+                                BATCH_SIZE,
+                            )
+
+                            continue
 
                         return data
 
