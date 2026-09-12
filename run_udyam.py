@@ -9,7 +9,7 @@ from udyam_extractor import (
     setup_logger,
 )
 
-TEST_STATE = "TELANGANA"  # Set to None for all States
+TEST_STATE = "ANDAMAN AND NICOBAR ISLANDS"  # Set to None for all States
 MAX_WORKERS = 3
 
 STATES = [

@@ -104,6 +104,60 @@ def format_elapsed(seconds):
     return f"{m:02d}:{s:02d}"
 
 
+def reconcile_state(
+    state,
+    total_records,
+    records_written,
+    logger,
+) -> bool:
+    """
+    Validate that the number of persisted records exactly matches
+    the record count reported by the source API.
+
+    Returns True when reconciliation passes, otherwise False.
+    """
+
+    if total_records is None:
+        logger.error(
+            "RECONCILIATION FAILED | "
+            "State=%s | "
+            "Reason=MissingAPITotal | "
+            "RecordsWritten=%s",
+            state,
+            records_written,
+        )
+        return False
+
+    expected = int(total_records)
+    actual = int(records_written)
+
+    if expected != actual:
+        logger.error(
+            "RECONCILIATION FAILED | "
+            "State=%s | "
+            "ExpectedRecords=%s | "
+            "ActualRecords=%s | "
+            "Difference=%s",
+            state,
+            expected,
+            actual,
+            actual - expected,
+        )
+        return False
+
+    logger.info(
+        "RECONCILIATION PASSED | "
+        "State=%s | "
+        "ExpectedRecords=%s | "
+        "ActualRecords=%s",
+        state,
+        expected,
+        actual,
+    )
+
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Run identity
 # ---------------------------------------------------------------------------
@@ -1000,11 +1054,31 @@ def extract_state(
             )
 
             # If recovery brought us to the known total,
-            # mark the state completed.
-            if (
-                total
-                and written >= total
-            ):
+            # reconcile before marking the state completed.
+            if total is not None and written >= total:
+
+                if not reconcile_state(
+                    state=state,
+                    total_records=total,
+                    records_written=written,
+                    logger=logger,
+                ):
+                    cp.update(
+                        {
+                            "status": "FAILED",
+                            "total_records": total,
+                            "records_written": written,
+                            "last_completed_offset": offset,
+                        }
+                    )
+
+                    save_checkpoint(
+                        run_id,
+                        state,
+                        cp,
+                    )
+
+                    return cp
 
                 cp.update(
                     {
@@ -1108,6 +1182,29 @@ def extract_state(
         # -------------------------------------------------------------------
 
         if not records:
+
+            if not reconcile_state(
+                state=state,
+                total_records=total,
+                records_written=written,
+                logger=logger,
+            ):
+                cp.update(
+                    {
+                        "status": "FAILED",
+                        "total_records": total,
+                        "records_written": written,
+                        "last_completed_offset": offset,
+                    }
+                )
+
+                save_checkpoint(
+                    run_id,
+                    state,
+                    cp,
+                )
+
+                return cp
 
             cp.update(
                 {
@@ -1301,9 +1398,35 @@ def extract_state(
         # -------------------------------------------------------------------
 
         if (
-            (total and written >= total)
-            or count < BATCH_SIZE
+            total is not None
+            and written >= total
+        ) or (
+            total is not None
+            and count < BATCH_SIZE
         ):
+
+            if not reconcile_state(
+                state=state,
+                total_records=total,
+                records_written=written,
+                logger=logger,
+            ):
+                cp.update(
+                    {
+                        "status": "FAILED",
+                        "total_records": total,
+                        "records_written": written,
+                        "last_completed_offset": offset,
+                    }
+                )
+
+                save_checkpoint(
+                    run_id,
+                    state,
+                    cp,
+                )
+
+                return cp
 
             cp.update(
                 {
