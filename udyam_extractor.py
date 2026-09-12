@@ -182,16 +182,14 @@ def write_batch_manifest(
     state: str,
     offset: int,
     record_count: int,
+    batch_path: Path,
     status: str = "SUCCESS",
 ) -> None:
     """
-    Append metadata for a persisted extraction batch.
+    Append metadata for a physically persisted extraction batch.
 
-    The manifest is append-only.
-    Each line represents one batch.
-
-    Manifest writes are protected by a process-level lock because
-    multiple states are extracted concurrently.
+    The manifest is append-only. Each line represents one batch and records
+    the physical batch artifact used for recovery.
     """
 
     batch_id = get_batch_id(
@@ -206,6 +204,7 @@ def write_batch_manifest(
         "state": state,
         "offset": offset,
         "record_count": record_count,
+        "batch_file": str(batch_path),
         "status": status,
         "persisted_at": datetime.now(
             timezone.utc
@@ -233,6 +232,7 @@ def write_batch_manifest(
             )
 
             file.flush()
+            os.fsync(file.fileno())
 
 
 def get_persisted_batch(
@@ -288,6 +288,28 @@ def get_persisted_batch(
     return None
 
 
+def is_batch_artifact_valid(
+    manifest_record,
+) -> bool:
+    """Verify the manifest's physical batch artifact exists and is non-empty."""
+
+    batch_file = manifest_record.get("batch_file")
+
+    if not batch_file:
+        return False
+
+    path = Path(batch_file)
+
+    try:
+        return (
+            path.exists()
+            and path.is_file()
+            and path.stat().st_size > 0
+        )
+    except OSError:
+        return False
+
+
 def is_batch_persisted(
     run_id: str,
     state: str,
@@ -338,6 +360,34 @@ def output_path(
     )
 
     return path / f"udyam_msme_{state}.csv"
+
+
+def batch_output_path(
+    run_id,
+    state,
+    offset,
+):
+    """Return the deterministic physical path for one extraction batch."""
+
+    batch_id = get_batch_id(
+        run_id,
+        state,
+        offset,
+    )
+
+    batch_dir = (
+        OUTPUT_ROOT
+        / run_id
+        / state
+        / "batches"
+    )
+
+    batch_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    return batch_dir / f"{batch_id}.csv"
 
 
 def load_checkpoint(
@@ -619,41 +669,60 @@ def fetch_batch(
 # CSV persistence
 # ---------------------------------------------------------------------------
 
-def append_records(
+def write_batch_file(
     path,
     records,
 ):
-    exists = (
-        path.exists()
-        and path.stat().st_size > 0
+    """
+    Write one complete batch to a temporary file and atomically publish it.
+
+    The final batch artifact is never intentionally exposed as a partial CSV.
+    """
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    with path.open(
-        "a",
-        newline="",
-        encoding="utf-8-sig",
-    ) as file:
+    temp_path = path.with_suffix(".tmp")
 
-        writer = csv.DictWriter(
-            file,
-            fieldnames=CSV_HEADERS,
-            extrasaction="ignore",
-        )
+    try:
+        with temp_path.open(
+            "w",
+            newline="",
+            encoding="utf-8-sig",
+        ) as file:
 
-        if not exists:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=CSV_HEADERS,
+                extrasaction="ignore",
+            )
+
             writer.writeheader()
 
-        for record in records:
+            for record in records:
+                writer.writerow(
+                    {
+                        header: record.get(
+                            header,
+                            "",
+                        )
+                        for header in CSV_HEADERS
+                    }
+                )
 
-            writer.writerow(
-                {
-                    header: record.get(
-                        header,
-                        "",
-                    )
-                    for header in CSV_HEADERS
-                }
-            )
+            file.flush()
+            os.fsync(file.fileno())
+
+        temp_path.replace(path)
+
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
     return len(records)
 
@@ -675,10 +744,9 @@ def extract_state(
         state,
     )
 
-    output_file = output_path(
-        run_id,
-        state,
-    )
+    # Batch artifacts under output/<run_id>/<state>/batches are the
+    # persistence source of truth for 2E recovery.
+    # The legacy single state-level CSV is intentionally not used here.
 
     # -----------------------------------------------------------------------
     # Already completed
@@ -722,22 +790,9 @@ def extract_state(
         "total_records"
     )
 
-    # If checkpoint shows progress but the output file
-    # no longer exists, restart the state.
-    if offset and not output_file.exists():
-
-        logger.warning(
-            "OUTPUT MISSING | "
-            "State=%s | "
-            "CheckpointOffset=%s | "
-            "RestartingState",
-            state,
-            offset,
-        )
-
-        offset = 0
-        written = 0
-        total = None
+    # Resume is driven by the checkpoint plus the batch manifest/artifacts.
+    # Do not reset progress merely because the legacy state-level CSV does
+    # not exist; 2E writes deterministic per-batch files instead.
 
     cp.update(
         {
@@ -796,6 +851,38 @@ def extract_state(
         )
 
         if persisted_batch is not None:
+
+            if not is_batch_artifact_valid(
+                persisted_batch
+            ):
+                logger.error(
+                    "MANIFEST ARTIFACT MISSING | "
+                    "State=%s | "
+                    "Offset=%s | "
+                    "BatchID=%s | "
+                    "BatchFile=%s",
+                    state,
+                    offset,
+                    persisted_batch.get("batch_id"),
+                    persisted_batch.get("batch_file"),
+                )
+
+                cp.update(
+                    {
+                        "status": "FAILED",
+                        "last_completed_offset": offset,
+                        "records_written": written,
+                        "total_records": total,
+                    }
+                )
+
+                save_checkpoint(
+                    run_id,
+                    state,
+                    cp,
+                )
+
+                return cp
 
             recovered_count = int(
                 persisted_batch.get(
@@ -1020,8 +1107,44 @@ def extract_state(
 
         batch_offset = offset
 
-        written_count = append_records(
-            output_file,
+        batch_file = batch_output_path(
+            run_id,
+            state,
+            batch_offset,
+        )
+
+        # If the final artifact exists without a SUCCESS manifest, do not
+        # overwrite it. Fail closed so the orphaned artifact can be inspected.
+        if batch_file.exists():
+            logger.error(
+                "BATCH ARTIFACT EXISTS WITHOUT MANIFEST | "
+                "State=%s | "
+                "Offset=%s | "
+                "BatchFile=%s",
+                state,
+                batch_offset,
+                batch_file,
+            )
+
+            cp.update(
+                {
+                    "status": "FAILED",
+                    "last_completed_offset": offset,
+                    "records_written": written,
+                    "total_records": total,
+                }
+            )
+
+            save_checkpoint(
+                run_id,
+                state,
+                cp,
+            )
+
+            return cp
+
+        written_count = write_batch_file(
+            batch_file,
             records,
         )
 
@@ -1084,6 +1207,7 @@ def extract_state(
             state=state,
             offset=batch_offset,
             record_count=written_count,
+            batch_path=batch_file,
             status="SUCCESS",
         )
 
