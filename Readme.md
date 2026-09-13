@@ -8,7 +8,7 @@ Production-grade Python pipeline for extracting MSME registered-unit data from t
 
 ## What It Does
 
-Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian state at a time, with parallel state workers. Each API page (10,000 records) is atomically persisted as an individual CSV artifact. Interrupted runs resume from the last successfully persisted batch — no records are re-fetched.
+Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian state at a time, with parallel state workers. Each API page (10,000 records) is atomically persisted as an individual CSV artifact. Interrupted runs resume from the last successfully persisted batch. Previously persisted and validated batches are not re-fetched; failed or incomplete API requests may be retried.
 
 **Source dataset:** [List of MSME Registered Units under UDYAM](https://www.data.gov.in/)
 **Publisher:** Ministry of Micro, Small and Medium Enterprises, Government of India
@@ -16,6 +16,69 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 **Reported volume:** 43,417,872+ records
 
 > Record counts reflect source data. Unique supplier counts require entity-level deduplication.
+
+---
+
+## Current Production Status
+
+### Implemented
+
+- Timestamp-based run identity with UUID-derived suffix
+- Batch-level atomic persistence (temp write → fsync → replace)
+- Append-only batch manifest (`manifest.jsonl`)
+- Atomic checkpoint persistence
+- Manifest + artifact validation on resume
+- Fail-closed orphaned artifact handling
+- Offset/limit pagination with short-page protection
+- State-level reconciliation (API total vs. persisted records)
+- Run-level reconciliation (all states completed + SUM check)
+- Structured per-execution log file
+- Process exit codes (`0` success / `1` failure)
+
+### Planned
+
+- Durable run summary artifact
+- Object-storage landing layer (raw CSV → cloud bucket)
+- Snowflake ingestion (RAW layer)
+- dbt Bronze / Silver / Gold transformations
+- Airflow orchestration and scheduling
+- CI/CD deployment pipeline
+- Monitoring and alerting
+- Data-quality framework
+- Data lineage and governance
+
+---
+
+## Target Architecture
+
+```
+Government of India
+  data.gov.in API
+        │
+        ▼
+Python Extraction Service   ◄── Airflow (orchestration, retries, scheduling)
+        │
+        ▼
+Raw / Landing Storage
+(CSV batch artifacts)
+        │
+        ▼
+   Snowflake RAW
+        │
+        ▼
+    dbt BRONZE
+        │
+        ▼
+    dbt SILVER
+        │
+        ▼
+     dbt GOLD
+        │
+        ▼
+BI / Analytics / ML
+```
+
+Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Server) span all layers. The extractor currently implements the extraction and local persistence layer only.
 
 ---
 
@@ -27,7 +90,7 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Exponential backoff with jitter on failure, up to 5 retries
 - Short-page protection — unexpected truncated responses are retried, not accepted
 - Parallel state processing via `ThreadPoolExecutor`
-- Unique UUID-style run identity per execution
+- Unique timestamp-based run identity with UUID-derived suffix
 - Atomic batch CSV writes (temp file → replace + `fsync`)
 - Append-only batch manifest (`manifest.jsonl`)
 - Checkpoint-based resume at the batch level
@@ -103,10 +166,12 @@ curl.exe --version
 
 All runtime configuration lives in `run_udyam.py`.
 
-| Variable | Default | Purpose |
+| Variable | Current Value | Purpose |
 |---|---|---|
-| `TEST_STATE` | `None` | Single state to process; `None` = all states |
+| `TEST_STATE` | `"ANDAMAN AND NICOBAR ISLANDS"` | Development/test state; set to `None` for all states |
 | `MAX_WORKERS` | `3` | Parallel state worker threads |
+
+> **Current repository configuration:** `TEST_STATE` is intentionally set to `"ANDAMAN AND NICOBAR ISLANDS"` for controlled testing. Do not change it to `None` until single-state validation is complete.
 
 Core constants in `udyam_extractor.py` (not normally changed):
 
@@ -160,11 +225,11 @@ When `UDYAM_RUN_ID` is not set, a new run ID is generated automatically.
 
 ### Run Identity
 
-Every execution gets a unique run ID:
+Every execution gets a unique timestamp-based run ID:
 
 ```
 20260912T165020Z_0ab2cda0
-  └─ UTC timestamp      └─ 8-char UUID suffix
+  └─ UTC timestamp   └─ 8-char UUID-derived suffix (uuid4().hex[:8])
 ```
 
 All output and checkpoint paths are scoped to this run ID.
@@ -261,7 +326,9 @@ If a run is interrupted, re-run with the same `UDYAM_RUN_ID`:
 State A  → status=COMPLETED           → SKIP
 State B  → status=IN_PROGRESS         → RESUME from last_completed_offset
            last_completed_offset=30000
-State C  → status=FAILED              → RETRY from beginning
+State C  → status=FAILED              → Restart state; previously persisted
+                                         batches are recovered, remaining
+                                         batches are fetched
 ```
 
 Previously persisted batches (validated via manifest + artifact check) are not re-fetched.
@@ -429,7 +496,7 @@ Thumbs.db
 
 ### 1.5.0 — Production reliability and reconciliation
 
-- Unique UUID-style run identity (`YYYYMMDDTHHMMSSZ_<8hexchars>`)
+- Timestamp-based run identity with UUID-derived suffix (`YYYYMMDDTHHMMSSZ_<8hexchars>`)
 - Deterministic batch identity (`run_id_state_offset`)
 - Atomic batch CSV persistence via temp-file replacement
 - Append-only batch manifest (`manifest.jsonl`)
@@ -450,6 +517,19 @@ Thumbs.db
 **Resource ID:** `8b68ae56-84cf-4728-a0a6-1be11028dea7`
 **Catalog UUID:** `0536e86e-3751-4054-84e5-e257d4c94477`
 **Reported volume:** 43,417,872+ records
+
+---
+
+## Known Limitations
+
+- The source API does not provide a stable record-level unique identifier for enterprises.
+- Current persistence format is CSV; Parquet / object-storage landing is planned.
+- Batch artifact validation verifies file existence and non-zero size only; record-level integrity checks are not performed at extraction time.
+- Record-level duplicate detection is not performed by the extractor — deduplication belongs in a downstream Silver-layer transform.
+- API totals are used for extraction reconciliation but do not establish enterprise uniqueness.
+- Run metadata is represented through logs, checkpoints, and the batch manifest; a dedicated run summary artifact is planned.
+- The extractor runs directly on Windows and is not yet deployed through CI/CD.
+- `MAX_WORKERS` concurrency is bounded by Udyam API stability, not local resources — increasing it without validating API behavior can cause widespread timeouts.
 
 ---
 
