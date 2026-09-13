@@ -1,98 +1,54 @@
 # Udyam MSME Extractor
 
-Version
+**Version 1.5.0**
 
-**1.5.0**
+Production-grade Python pipeline for extracting MSME registered-unit data from the Government of India's Udyam dataset via the `data.gov.in` API. Designed for Supplier.io's supplier intelligence ingestion workflow.
 
-Python-based data extraction pipeline for retrieving MSME registered-unit data from the Government of India's Udyam dataset through the `data.gov.in` API.
+---
 
-The pipeline extracts data at the **State → District** level, handles API pagination, retries failed requests, maintains execution checkpoints, supports parallel district processing, and stores monthly snapshots.
+## What It Does
+
+Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian state at a time, with parallel state workers. Each API page (10,000 records) is atomically persisted as an individual CSV artifact. Interrupted runs resume from the last successfully persisted batch — no records are re-fetched.
+
+**Source dataset:** [List of MSME Registered Units under UDYAM](https://www.data.gov.in/)
+**Publisher:** Ministry of Micro, Small and Medium Enterprises, Government of India
+**Resource ID:** `8b68ae56-84cf-4728-a0a6-1be11028dea7`
+**Reported volume:** 43,417,872+ records
+
+> Record counts reflect source data. Unique supplier counts require entity-level deduplication.
 
 ---
 
 ## Features
 
-- State-level API extraction
-
-- Pagination with configurable batch size
-
-- 10,000 records per API request
-
-- `curl.exe` based API requests
-
-- Automatic retry handling
-
-- Exponential backoff with jitter
-
-- Connection and request timeouts
-
-- Unique run-level execution isolation
-
-- Checkpoint-based resume capability with batch recovery
-
-- Completed state detection within the current run
-
-- Parallel state processing
-
-- Run-level execution timing
-
-- Run-level execution timing
-
-- Overall execution timing
-
-- Deterministic batch CSV output per State
-
-- Separate execution logs
-
-- API key stored outside source code
-
-- Failed states do not stop the complete extraction run
+- State-level API extraction with `filters[State]` parameter
+- Offset/limit pagination — 10,000 records per request
+- `curl.exe`-based HTTP (Windows-native, no third-party HTTP library)
+- Exponential backoff with jitter on failure, up to 5 retries
+- Short-page protection — unexpected truncated responses are retried, not accepted
+- Parallel state processing via `ThreadPoolExecutor`
+- Unique UUID-style run identity per execution
+- Atomic batch CSV writes (temp file → replace + `fsync`)
+- Append-only batch manifest (`manifest.jsonl`)
+- Checkpoint-based resume at the batch level
+- Fail-closed on orphaned artifacts (CSV present but no manifest entry → hard stop)
+- State-level and run-level reconciliation (API totals vs. persisted records)
+- Per-execution log file
+- API key stored in `.env`, never in source
 
 ---
 
-## Source
-
-**Dataset:** List of MSME Registered Units under UDYAM
-
-**Publisher:** Ministry of Micro, Small and Medium Enterprises
-
-**Platform:** Government of India Open Government Data Platform
-
-**Resource ID:**
-
-```text
-
-8b68ae56-84cf-4728-a0a6-1be11028dea7
+## Project Structure
 
 ```
-
-**Reported source volume:**
-
-```text
-
-43,417,872+ records
-
-```
-
-> The reported record count represents source records and should not be interpreted as the number of unique suppliers without entity-level deduplication and validation.
-
----
-
-**## Project Structure**
-
-Current production-oriented structure:
-
 Udyam_MSME/
-│
-├── .env
+├── udyam_extractor.py        # Core extraction engine
+├── run_udyam.py              # Entry point and runtime config
+├── .env                      # API key (not committed)
 ├── .gitignore
-├── README.md
+├── Readme.md
 │
-├── udyam_extractor.py
-├── run_udyam.py
-├── udyam_state_district.json
-│
-├── output/
+├── output/                   # Runtime — not committed
 │   └── <run_id>/
 │       ├── manifest.jsonl
 │       └── <state>/
@@ -101,1303 +57,402 @@ Udyam_MSME/
 │               ├── <run_id>_<state>_10000.csv
 │               └── ...
 │
-├── checkpoints/
+├── checkpoints/              # Runtime — not committed
 │   └── <run_id>/
 │       └── <state>.json
 │
-└── logs/
-    └── udyam_master_YYYYMMDD_HHMMSS.log
-
-output/, checkpoints/, and logs/ are runtime artifacts and should not be committed to Git.
+└── logs/                     # Runtime — not committed
+    └── udyam_<YYYYMMDD_HHMMSS>.log
+```
 
 ---
 
 ## Requirements
 
-### Python
-
-Recommended:
-
-```text
-
-Python 3.10+
-
-```
-
-The pipeline uses `curl.exe` for API requests and is intended to run in a Windows environment.
-
-### Python Packages
-
-Install the required dependency:
+- **Python 3.10+** (Windows)
+- **`curl.exe`** — included in Windows 10/11; verify with `curl.exe --version`
+- **`python-dotenv`** — the only third-party Python dependency
 
 ```powershell
-
 pip install python-dotenv
-
 ```
 
 ---
 
-## Environment Configuration
+## Setup
 
-Create a `.env` file in the project root:
+**1. Clone the repository and navigate to the project root.**
+
+**2. Create a `.env` file:**
 
 ```env
-
 UDYAM_API_KEY=YOUR_API_KEY
-
 ```
 
-The API key is loaded through the environment and is not hardcoded into the Python source.
+Never commit `.env` to Git.
 
-### Important
+**3. Verify `curl.exe` is available:**
 
-Do not commit `.env` to Git.
-
----
-
-## `.gitignore`
-
-Recommended `.gitignore`:
-
-```gitignore
-
-# Environment
-
-.env
-
-# Python
-
-__pycache__/
-
-*.py[cod]
-
-*.pyo
-
-# Output data
-
-output/
-
-# Execution checkpoints
-
-checkpoints/
-
-# Logs
-
-logs/
-
-# Virtual environment
-
-venv/
-
-.venv/
-
-env/
-
-# IDE
-
-.vscode/
-
-.idea/
-
-# OS
-
-.DS_Store
-
-Thumbs.db
-
+```powershell
+curl.exe --version
 ```
 
 ---
 
 ## Configuration
 
-The main runtime configuration is located in `run_udyam.py`.
+All runtime configuration lives in `run_udyam.py`.
 
-### State Filter
+| Variable | Default | Purpose |
+|---|---|---|
+| `TEST_STATE` | `None` | Single state to process; `None` = all states |
+| `MAX_WORKERS` | `3` | Parallel state worker threads |
 
-For testing a specific state:
+Core constants in `udyam_extractor.py` (not normally changed):
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `BATCH_SIZE` | `10000` | Records per API request |
+| `MAX_RETRIES` | `5` | Retry attempts per batch |
+| `CONNECT_TIMEOUT` | `30` | curl connect timeout (seconds) |
+| `MAX_REQUEST_TIME` | `300` | curl max request duration (seconds) |
+
+---
+
+## Running the Pipeline
+
+### Single state (for testing)
 
 ```python
-
+# in run_udyam.py
 TEST_STATE = "BIHAR"
-
 ```
 
-To process all states:
+```powershell
+python .\run_udyam.py
+```
+
+### Full extraction (all states)
 
 ```python
-
+# in run_udyam.py
 TEST_STATE = None
-
 ```
 
-Examples:
-
-```python
-
-TEST_STATE = "BIHAR"
-
+```powershell
+python .\run_udyam.py
 ```
 
-```python
+### Resume a specific run
 
-TEST_STATE = "MAHARASHTRA"
-
+```powershell
+$env:UDYAM_RUN_ID = "20260912T165020Z_0ab2cda0"
+python .\run_udyam.py
 ```
 
-```python
+When `UDYAM_RUN_ID` is not set, a new run ID is generated automatically.
 
-TEST_STATE = None
-
-```
+**Exit codes:** `0` = all states completed + reconciliation passed | `1` = failure
 
 ---
 
-## Parallel Processing
+## How It Works
 
-Districts are processed in parallel using `ThreadPoolExecutor`.
+### Run Identity
 
-Current configuration:
-
-```python
-
-MAX_WORKERS = 3
+Every execution gets a unique run ID:
 
 ```
-
-This means up to three districts can be processed concurrently within a state.
-
-Example:
-
-```text
-
-BIHAR
-
- │
-
- ├── ARARIA       ── Worker 1
-
- ├── ARWAL        ── Worker 2
-
- └── AURANGABAD   ── Worker 3
-
+20260912T165020Z_0ab2cda0
+  └─ UTC timestamp      └─ 8-char UUID suffix
 ```
 
-When one worker finishes, it picks up the next district.
+All output and checkpoint paths are scoped to this run ID.
 
-### Recommended Worker Configuration
+### Pagination
 
-Start with:
-
-```python
-
-MAX_WORKERS = 3
+The API is queried with increasing offsets until the full state record count is retrieved:
 
 ```
-
-The Udyam API can experience intermittent timeouts, so increasing concurrency should be done gradually.
-
-Possible progression:
-
-```text
-
-3 workers
-
-   ↓
-
-5 workers
-
-   ↓
-
-Evaluate API stability
-
-```
-
-Avoid unnecessarily high concurrency because increased parallelism can increase API timeouts or throttling.
-
----
-
-## API Configuration
-
-The Udyam resource is:
-
-```text
-
-https://api.data.gov.in/resource/8b68ae56-84cf-4728-a0a6-1be11028dea7
-
-```
-
-Requests contain:
-
-```text
-
-api-key
-
-format
-
-offset
-
-limit
-
-filters[State]
-
-filters[District]
-
-```
-
-Example:
-
-```text
-
-?api-key=<API_KEY>
-
-&format=json
-
-&offset=0
-
-&limit=10000
-
-&filters[State]=BIHAR
-
-&filters[District]=ARARIA
-
-```
-
----
-
-## Pagination
-
-The API is queried using an offset/limit mechanism.
-
-Default configuration:
-
-```python
-
-BATCH_SIZE = 10000
-
-```
-
-Example:
-
-```text
-
-Request 1
-
-offset = 0
-
-limit  = 10000
-
-Request 2
-
-offset = 10000
-
-limit  = 10000
-
-Request 3
-
-offset = 20000
-
-limit  = 10000
-
+offset=0,     limit=10000  → Batch 1
+offset=10000, limit=10000  → Batch 2
+offset=20000, limit=10000  → Batch 3
 ...
-
 ```
 
-The process continues until all records reported by the API have been retrieved.
+### Persistence Order
 
----
-
-## Retry Handling
-
-API failures are automatically retried.
-
-Current configuration:
-
-```python
-
-MAX_RETRIES = 5
+For each batch, persistence happens in strict order:
 
 ```
-
-Retry delays use exponential backoff with random jitter.
-
-Conceptually:
-
-```text
-
-Attempt 1
-
-   ↓
-
-wait
-
-   ↓
-
-Attempt 2
-
-   ↓
-
-wait
-
-   ↓
-
-Attempt 3
-
-   ↓
-
-wait
-
-   ↓
-
-...
-
+API response
+    ↓
+Atomic batch CSV   (temp write → fsync → replace)
+    ↓
+Manifest entry     (SUCCESS appended to manifest.jsonl)
+    ↓
+Atomic checkpoint  (state progress updated)
 ```
 
-Jitter is added to prevent multiple parallel workers from retrying at exactly the same time.
+Recovery trusts a batch only when **both** a manifest entry and a non-empty physical file exist. An orphaned artifact (file without manifest entry) causes a hard stop rather than an overwrite.
 
----
+### Short-Page Protection
 
-## Timeout Configuration
-
-Current configuration:
-
-```python
-
-CONNECT_TIMEOUT = 30
-
-MAX_REQUEST_TIME = 300
+A page with fewer than 10,000 records is accepted only when it is the final page:
 
 ```
-
-Meaning:
-
-- Connection timeout: 30 seconds
-
-- Maximum API request duration: 300 seconds
-
-The pipeline specifically handles `curl` return code:
-
-```text
-
-28
-
+offset + record_count >= API total
 ```
 
-which indicates a timeout.
+If the API returns a short page mid-extraction, the same offset is retried. This prevents transient API truncation from silently ending a run early.
 
----
+### Parallel Processing
 
-## Checkpointing
-
-Each State/District has a checkpoint file.
-
-Example:
-
-```text
-
-checkpoints/
-
-└── 2026-08/
-
-    └── BIHAR_ARARIA.json
+Up to `MAX_WORKERS` states are extracted concurrently:
 
 ```
+Run
+ ├── ANDAMAN AND NICOBAR ISLANDS  ── Worker 1
+ ├── ANDHRA PRADESH               ── Worker 2
+ └── ARUNACHAL PRADESH            ── Worker 3
+        (next state picks up when a worker finishes)
+```
 
-Example checkpoint:
+Start conservatively at `MAX_WORKERS = 3`. The Udyam API can throttle under high concurrency.
+
+### Reconciliation
+
+State-level (per state, after all batches complete):
+```
+API total records == records written
+```
+
+Run-level (after all states complete):
+```
+All states = COMPLETED
+AND  SUM(API totals) == SUM(records written)
+```
+
+A mismatch at either level causes a failure.
+
+### Checkpoints
+
+One checkpoint file per state per run at `checkpoints/<run_id>/<state>.json`:
 
 ```json
-
 {
-
-    "run_id": "2026-08",
-
-    "state": "BIHAR",
-
-    "district": "ARARIA",
-
-    "total_records": 47494,
-
-    "records_written": 47494,
-
-    "last_completed_offset": 47494,
-
-    "status": "COMPLETED",
-
-    "updated_at": "2026-08-25T20:30:00"
-
+    "run_id": "20260912T165020Z_0ab2cda0",
+    "state": "ANDAMAN AND NICOBAR ISLANDS",
+    "total_records": 18058,
+    "records_written": 18058,
+    "last_completed_offset": 18058,
+    "status": "COMPLETED",
+    "updated_at": "2026-09-12T16:51:22+00:00"
 }
+```
+
+Status values: `NOT_STARTED` | `IN_PROGRESS` | `COMPLETED` | `FAILED`
+
+### Resume Behavior
+
+If a run is interrupted, re-run with the same `UDYAM_RUN_ID`:
 
 ```
+State A  → status=COMPLETED           → SKIP
+State B  → status=IN_PROGRESS         → RESUME from last_completed_offset
+           last_completed_offset=30000
+State C  → status=FAILED              → RETRY from beginning
+```
+
+Previously persisted batches (validated via manifest + artifact check) are not re-fetched.
 
 ---
 
-## Resume Behavior
+## Output
 
-Checkpointing allows an interrupted extraction to resume from the last successfully written batch.
+### CSV Schema
 
-Example:
+Each batch file contains these columns:
 
-```text
+| Column | Description |
+|---|---|
+| `LG_ST_Code` | State code |
+| `State` | State name |
+| `LG_DT_Code` | District code |
+| `District` | District name |
+| `Pincode` | PIN code |
+| `RegistrationDate` | Udyam registration date |
+| `EnterpriseName` | Registered enterprise name |
+| `CommunicationAddress` | Enterprise address |
+| `Activities` | JSON array of NIC codes and descriptions |
 
-Total records: 47,494
-
-Batch 1 → 10,000 ✓
-
-Batch 2 → 10,000 ✓
-
-Batch 3 → 10,000 ✓
-
-Batch 4 → API timeout
-
+`Activities` example:
+```json
+[{"NIC5DigitId": "79110", "Description": "Travel agency activities"}]
 ```
 
-Checkpoint:
-
-```text
-
-last_completed_offset = 30000
-
-status = FAILED
+### Batch File Naming
 
 ```
-
-When the extraction is restarted:
-
-```text
-
-Resume
-
-  ↓
-
-offset = 30000
-
-  ↓
-
-retrieve remaining records
-
-```
-
-Previously written records do not need to be retrieved again.
-
----
-
-**## Run Identity**
-
-Every execution receives a unique run ID.
-
-Example:
-
-20260912T165020Z_0ab2cda0
-
-The run ID contains a UTC timestamp and short UUID suffix.
-
-A specific run can be resumed with:
-
-$env:UDYAM_RUN_ID = "20260912T165020Z_0ab2cda0"
-
-When no run ID is supplied, a new run ID is generated automatically.
-
-Batch Identity and Persistence
-
-Each API batch has a deterministic ID:
-
-<run_id>_<state>_<offset>
-
-Each successful batch is written as an individual CSV artifact under:
-
-output/<run_id>/<state>/batches/
-
-Batch files are written atomically through a temporary file followed by replacement.
-
-Every successful batch is also recorded in:
-
-output/<run_id>/manifest.jsonl
-
-The persistence order is:
-
-API response
-    |
-    v
-Atomic batch CSV
-    |
-    v
-Manifest SUCCESS entry
-    |
-    v
-Atomic checkpoint update
-
-Recovery trusts a batch only when both its successful manifest entry and physical non-empty artifact exist.
-
-If an orphaned batch artifact exists without a manifest entry, the extractor fails closed rather than overwriting it.
-
----
-
-**## Output**
-
-The extractor produces one CSV artifact per API batch.
-
-Naming convention:
-
 <run_id>_<state>_<offset>.csv
+```
 
 Example:
-
+```
 20260912T165020Z_0ab2cda0_ANDAMAN AND NICOBAR ISLANDS_0.csv
+20260912T165020Z_0ab2cda0_ANDAMAN AND NICOBAR ISLANDS_10000.csv
+```
 
-This batch-oriented layout provides independently recoverable artifacts suitable for later raw-storage and warehouse loading.
+### Manifest
 
----
+`output/<run_id>/manifest.jsonl` — one line per successfully persisted batch:
 
-## CSV Columns
-
-The output contains:
-
-```text
-
-LG_ST_Code
-
-State
-
-LG_DT_Code
-
-District
-
-Pincode
-
-RegistrationDate
-
-EnterpriseName
-
-CommunicationAddress
-
-Activities
-
+```json
+{
+    "batch_id": "20260912T165020Z_0ab2cda0_ANDAMAN AND NICOBAR ISLANDS_0",
+    "run_id": "20260912T165020Z_0ab2cda0",
+    "state": "ANDAMAN AND NICOBAR ISLANDS",
+    "offset": 0,
+    "record_count": 10000,
+    "batch_file": "output\\...\\ANDAMAN AND NICOBAR ISLANDS\\batches\\...csv",
+    "status": "SUCCESS",
+    "persisted_at": "2026-09-12T16:50:54.146875+00:00"
+}
 ```
 
 ---
 
 ## Logging
 
-A new log file is created for every execution.
+A new log file is created per execution at `logs/udyam_<YYYYMMDD_HHMMSS>.log`.
 
-Example:
+Log entries cover: run ID, state, API request details, offset, retry attempts, records retrieved/written, batch/state/overall elapsed times, and final summary.
 
-```text
-
-logs/
-
-└── udyam_master_20260825_203000.log
+Timing is emitted at three levels:
 
 ```
-
-The log includes:
-
-- Execution start
-
-- Run ID
-
-- State
-
-- District
-
-- API request
-
-- Offset
-
-- Batch size
-
-- Retry attempts
-
-- API failures
-
-- Records retrieved
-
-- Records written
-
-- District elapsed time
-
-- State elapsed time
-
-- Overall elapsed time
-
-- Final execution summary
-
----
-
-## Execution Timing
-
-The pipeline records timing at three levels.
-
-### Batch
-
-Example:
-
-```text
-
-BATCH COMPLETE |
-
-Batch=3 |
-
-BatchRecords=10000 |
-
-Progress=30000/47494 |
-
-BatchElapsed=00:02:41
-
-```
-
-### District
-
-Example:
-
-```text
-
-DISTRICT COMPLETED |
-
-State=BIHAR |
-
-District=ARARIA |
-
-Records=47494 |
-
-Elapsed=00:18:42
-
-```
-
-### State
-
-Example:
-
-```text
-
-STATE COMPLETED |
-
-State=BIHAR |
-
-State elapsed time=01:42:16
-
-```
-
-### Overall
-
-Example:
-
-```text
-
-Total elapsed time=01:45:31
-
+BATCH COMPLETE   | Batch=2 | BatchRecords=10000 | Progress=10000/18058 | BatchElapsed=00:01:12
+STATE COMPLETED  | State=ANDAMAN AND NICOBAR ISLANDS | Records=18058 | Elapsed=00:02:31
+Total elapsed time=00:02:35
 ```
 
 ---
 
-## Running the Pipeline
+## Pre-Production Checklist
 
-### 1. Test a Single State
+Before running the full 43M-record extraction:
 
-Set:
+1. Run a single state: `TEST_STATE = "BIHAR"`
+2. Validate generated CSVs — row counts, column completeness, `Activities` JSON
+3. Confirm record counts match the API `total` field
+4. Review log for timeout frequency
+5. Check checkpoint and resume behavior (kill mid-run, re-run with same `UDYAM_RUN_ID`)
+6. Confirm output directory structure
+7. Then set `TEST_STATE = None` and run all states
+
+Recommended initial config:
 
 ```python
-
-TEST_STATE = "BIHAR"
-
-```
-
-Run:
-
-```powershell
-
-python .\run_udyam.py
-
-```
-
----
-
-### 2. Test Another State
-
-Change:
-
-```python
-
-TEST_STATE = "MAHARASHTRA"
-
-```
-
-Then:
-
-```powershell
-
-python .\run_udyam.py
-
-```
-
----
-
-### 3. Full Extraction
-
-Set:
-
-```python
-
-TEST_STATE = None
-
-```
-
-Then run:
-
-```powershell
-
-python .\run_udyam.py
-
-```
-
-All states and their configured districts will be processed.
-
----
-
-**## Execution Flow
-
-run_udyam.py
-      |
-      v
-Load environment configuration
-      |
-      v
-Determine RUN_ID
-      |
-      v
-Validate requested States
-      |
-      v
-Extract States
-      |
-      v
-For each State
-      |
-      v
-Checkpoint / batch recovery
-      |
-      v
-API request + pagination
-      |
-      v
-Short-page validation and retry
-      |
-      v
-Atomic batch persistence
-      |
-      v
-Manifest entry
-      |
-      v
-Atomic checkpoint update
-      |
-      v
-State-level reconciliation
-      |
-      v
-Run-level reconciliation
-      |
-      v
-RUN COMPLETED / RUN FAILED
-
-Pagination Safety
-
-A full page of 10,000 records is accepted.
-
-A short page is accepted only when it is the final page:
-
-offset + record_count >= API total
-
-An unexpected short page is retried at the same offset.
-
-This prevents transient short API responses from prematurely ending extraction.
-
-Reconciliation
-
-State-level
-
-API total records == persisted records
-
-A mismatch causes the state to fail.
-
-Run-level
-
-A run succeeds only when:
-
-All requested states are COMPLETED
-AND
-Every state has an API total
-AND
-SUM(API totals) == SUM(records written)
-
-The runner returns:
-
-0 = successful run
-1 = failed run or reconciliation failure
-
---------------------+
-
-      |                    |
-
-      v                    v
-
- District A            District B
-
-      |                    |
-
-      v                    v
-
-Checkpoint             Checkpoint
-
-      |                    |
-
-      v                    v
-
-API Request             API Request
-
-      |                    |
-
-      v                    v
-
-Pagination              Pagination
-
-      |                    |
-
-      v                    v
-
-CSV Output              CSV Output
-
-      |                    |
-
-      +---------+----------+
-
-                |
-
-                v
-
-        State Summary
-
-                |
-
-                v
-
-        Overall Summary
-
-```
-
----
-
-## Master State/District File
-
-The extraction uses:
-
-```text
-
-udyam_state_district.json
-
-```
-
-The file contains the State/District combinations used for extraction.
-
-Example structure:
-
-```json
-
-{
-
-    "states": [
-
-        {
-
-            "state": "BIHAR",
-
-            "districts": [
-
-                {
-
-                    "value": "ARARIA",
-
-                    "text": "ARARIA"
-
-                },
-
-                {
-
-                    "value": "ARWAL",
-
-                    "text": "ARWAL"
-
-                }
-
-            ]
-
-        }
-
-    ]
-
-}
-
-```
-
-The `value` field is used as the API filter.
-
----
-
-## Production Run Recommendations
-
-Before running the complete dataset:
-
-1. Validate the State/District master.
-
-2. Run one State first.
-
-3. Validate the generated CSVs.
-
-4. Check record counts against the API response.
-
-5. Review timeout frequency.
-
-6. Review State and District elapsed times.
-
-7. Confirm checkpoint/resume behavior.
-
-8. Confirm output structure.
-
-9. Then enable all States.
-
-Recommended initial configuration:
-
-```python
-
-TEST_STATE = "BIHAR"
-
+TEST_STATE  = "BIHAR"
 MAX_WORKERS = 3
-
-BATCH_SIZE = 10000
-
-MAX_RETRIES = 5
-
 ```
 
 After validation:
 
 ```python
-
-TEST_STATE = None
-
-```
-
----
-
-## Error Recovery
-
-If the process stops unexpectedly:
-
-```powershell
-
-python .\run_udyam.py
-
-```
-
-can be executed again.
-
-The current monthly `RUN_ID` is reused.
-
-Completed states and persisted batches are skipped or recovered.
-
-Incomplete states resume using checkpoints and batch artifacts.
-
-Example:
-
-```text
-
-BIHAR_ARARIA
-
-status = COMPLETED
-
-→ SKIP
-
-BIHAR_ARWAL
-
-status = IN_PROGRESS
-
-last_completed_offset = 30000
-
-→ RESUME FROM 30000
-
-BIHAR_BANKA
-
-status = FAILED
-
-→ RETRY
-
+TEST_STATE  = None
+MAX_WORKERS = 3   # increase gradually if API is stable
 ```
 
 ---
 
 ## Troubleshooting
 
-### API Timeout
-
-If the log contains:
-
-```text
-
-API TIMEOUT
+### API timeout (`curl` return code 28)
 
 ```
-
-the request exceeded the configured timeout.
-
-The pipeline automatically retries the request.
-
-If timeouts become frequent, consider reducing:
-
-```python
-
-MAX_WORKERS = 3
-
-```
-
-to:
-
-```python
-
-MAX_WORKERS = 2
-
-```
-
----
-
-### curl Return Code 28
-
-```text
-
 CURL FAILURE | ReturnCode=28
-
 ```
 
-Return code `28` indicates a timeout.
+Automatic retry will handle transient timeouts. If timeouts are frequent, reduce `MAX_WORKERS`:
 
-The request is automatically retried according to the retry configuration.
+```python
+MAX_WORKERS = 2
+```
 
----
+### Missing API key
 
-### Missing API Key
-
-If the log contains:
-
-```text
-
+```
 UDYAM_API_KEY is not configured.
-
 ```
 
-verify `.env` contains:
+Ensure `.env` exists in the project root and contains:
 
 ```env
-
 UDYAM_API_KEY=YOUR_API_KEY
-
 ```
 
----
+### Orphaned batch artifact
 
-### Master File Not Found
-
-If:
-
-```text
-
-Master file not found
-
-```
-
-verify:
-
-```text
-
-udyam_state_district.json
-
-```
-
-exists in the project root.
+The extractor fails closed if a CSV file exists on disk without a corresponding manifest entry. Investigate before deleting the file — this indicates an interrupted write sequence. Delete the orphaned file only after confirming it is incomplete or zero-byte.
 
 ---
 
 ## Security
 
-API credentials must be stored outside the source code.
+- Store the API key only in `.env`
+- `.env` is excluded from Git via `.gitignore`
+- If a key is accidentally committed: revoke it immediately, purge from history, issue a new key
 
-Use:
+---
 
-```text
+## .gitignore
 
+```gitignore
 .env
-
-```
-
-Example:
-
-```env
-
-UDYAM_API_KEY=YOUR_API_KEY
-
-```
-
-Never commit API credentials to Git.
-
-If an API key is accidentally committed:
-
-1. Revoke or rotate the key.
-
-2. Remove the credential from repository history where appropriate.
-
-3. Create a new credential.
-
-4. Update `.env`.
-
----
-
-## Dependencies
-
-Install:
-
-```powershell
-
-pip install python-dotenv
-
-```
-
-The extraction uses:
-
-```text
-
-curl.exe
-
-```
-
-Verify it is available:
-
-```powershell
-
-curl.exe --version
-
+__pycache__/
+*.py[cod]
+output/
+checkpoints/
+logs/
+venv/
+.venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
 ```
 
 ---
 
-## Git Repository Structure
+## Version History
 
-```text
+### 1.5.0 — Production reliability and reconciliation
 
-Udyam_MSME/
-
-│
-
-├── README.md
-
-├── .gitignore
-
-├── .env                    # NOT committed
-
-│
-
-├── udyam_extractor.py
-
-├── run_udyam.py
-
-├── udyam_state_district.json
-
-│
-
-├── output/                 # NOT committed
-
-├── checkpoints/            # NOT committed
-
-└── logs/                   # NOT committed
-
-```
+- Unique UUID-style run identity (`YYYYMMDDTHHMMSSZ_<8hexchars>`)
+- Deterministic batch identity (`run_id_state_offset`)
+- Atomic batch CSV persistence via temp-file replacement
+- Append-only batch manifest (`manifest.jsonl`)
+- Atomic checkpoint persistence
+- Batch artifact validation on resume
+- Fail-closed orphaned artifact handling
+- Short-page pagination safety
+- State-level reconciliation
+- Run-level reconciliation
+- Exit code reflects run success (`0` / `1`)
 
 ---
 
-**## Version History
+## Data Source Reference
 
-1.5.0
-
-Production reliability and reconciliation release.
-
-Key improvements:
-
-Unique run identity
-
-Deterministic batch identity
-
-Atomic batch persistence
-
-Append-only batch manifest
-
-Atomic checkpoint persistence
-
-Batch artifact validation
-
-Batch recovery
-
-Fail-closed orphan artifact handling
-
-Short-page pagination safety
-
-State-level reconciliation
-
-Run-level reconciliation
-
-Exit code based on run success
-
-Data Source Reference**
-
-Government of India Open Government Data Platform:
-
-https://www.data.gov.in/
-
-Dataset:
-
-```text
-
-List of MSME Registered Units under UDYAM
-
-```
-
-Resource ID:
-
-```text
-
-8b68ae56-84cf-4728-a0a6-1be11028dea7
-
-```
-
-Catalog UUID:
-
-```text
-
-0536e86e-3751-4054-84e5-e257d4c94477
-
-```
-
-Reported source volume:
-
-```text
-
-43,417,872+ records
-
-```
+**Platform:** Government of India Open Government Data Platform — https://www.data.gov.in/
+**Dataset:** List of MSME Registered Units under UDYAM
+**Resource ID:** `8b68ae56-84cf-4728-a0a6-1be11028dea7`
+**Catalog UUID:** `0536e86e-3751-4054-84e5-e257d4c94477`
+**Reported volume:** 43,417,872+ records
 
 ---
 
 ## Disclaimer
 
-The information and record counts described in this README are based on the Udyam dataset metadata available from the Government of India's Open Government Data Platform at the time of assessment.
-
-The source may be updated periodically, and record counts and individual records may change over time.
-
-The reported number of records should not be treated as the number of unique companies or suppliers without additional entity-level validation and deduplication.
+Record counts and dataset content are based on Udyam metadata available at the time of extraction. The source is updated periodically. The reported record count does not represent unique companies or suppliers without additional entity-level validation and deduplication.
