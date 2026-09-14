@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import threading
+import hashlib
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -230,6 +231,18 @@ def get_manifest_path(
 
     return run_dir / "manifest.jsonl"
 
+def calculate_file_sha256(path: Path) -> str:
+    """
+    Calculate the SHA-256 checksum of a file.
+    """
+    sha256 = hashlib.sha256()
+
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            sha256.update(chunk)
+
+    return sha256.hexdigest()
+
 def get_run_summary_path(
     run_id: str,
 ) -> Path:
@@ -301,6 +314,7 @@ def write_batch_manifest(
     offset: int,
     record_count: int,
     batch_path: Path,
+    checksum: str,
     status: str = "SUCCESS",
 ) -> None:
     """
@@ -323,6 +337,7 @@ def write_batch_manifest(
         "offset": offset,
         "record_count": record_count,
         "batch_file": str(batch_path),
+        "checksum": checksum,
         "status": status,
         "persisted_at": datetime.now(
             timezone.utc
@@ -409,24 +424,33 @@ def get_persisted_batch(
 def is_batch_artifact_valid(
     manifest_record,
 ) -> bool:
-    """Verify the manifest's physical batch artifact exists and is non-empty."""
+    """
+    Verify that the manifest's physical batch artifact exists,
+    is non-empty, and matches the recorded SHA-256 checksum.
+    """
 
     batch_file = manifest_record.get("batch_file")
+    expected_checksum = manifest_record.get("checksum")
 
-    if not batch_file:
+    if not batch_file or not expected_checksum:
         return False
 
     path = Path(batch_file)
 
     try:
-        return (
+        if not (
             path.exists()
             and path.is_file()
             and path.stat().st_size > 0
-        )
+        ):
+            return False
+
+        actual_checksum = calculate_file_sha256(path)
+
+        return actual_checksum == expected_checksum
+
     except OSError:
         return False
-
 
 def is_batch_persisted(
     run_id: str,
@@ -1008,19 +1032,47 @@ def extract_state(
 
         if persisted_batch is not None:
 
-            if not is_batch_artifact_valid(
-                persisted_batch
-            ):
+            batch_file = persisted_batch.get("batch_file")
+            expected_checksum = persisted_batch.get("checksum")
+
+            if not batch_file:
+                validation_reason = "MissingBatchFile"
+
+            elif not Path(batch_file).exists():
+                validation_reason = "BatchFileNotFound"
+
+            elif not Path(batch_file).is_file():
+                validation_reason = "BatchPathNotFile"
+
+            elif Path(batch_file).stat().st_size <= 0:
+                validation_reason = "BatchFileEmpty"
+
+            elif not expected_checksum:
+                validation_reason = "MissingChecksum"
+
+            else:
+                actual_checksum = calculate_file_sha256(
+                    Path(batch_file)
+                )
+
+                if actual_checksum != expected_checksum:
+                    validation_reason = "ChecksumMismatch"
+                else:
+                    validation_reason = None
+
+            if validation_reason is not None:
                 logger.error(
-                    "MANIFEST ARTIFACT MISSING | "
+                    "BATCH ARTIFACT VALIDATION FAILED | "
                     "State=%s | "
                     "Offset=%s | "
                     "BatchID=%s | "
+                    "Reason=%s | "
                     "BatchFile=%s",
                     state,
                     offset,
                     persisted_batch.get("batch_id"),
-                    persisted_batch.get("batch_file"),
+                    validation_reason,
+                    batch_file,
                 )
 
                 cp.update(
@@ -1387,18 +1439,26 @@ def extract_state(
         offset += written_count
 
         # -------------------------------------------------------------------
+        # Batch integrity
+        # -------------------------------------------------------------------
+
+        checksum = calculate_file_sha256(batch_file)
+
+        # -------------------------------------------------------------------
         # Manifest persistence
         #
         # Ordering:
         #
         #     CSV
         #       ↓
+        #     SHA-256 checksum
+        #       ↓
         #     Manifest
         #       ↓
         #     Checkpoint
         #
         # A SUCCESS manifest entry therefore means the CSV batch
-        # has already been written.
+        # has already been written and its checksum has been recorded.
         # -------------------------------------------------------------------
 
         write_batch_manifest(
@@ -1407,6 +1467,7 @@ def extract_state(
             offset=batch_offset,
             record_count=written_count,
             batch_path=batch_file,
+            checksum=checksum,
             status="SUCCESS",
         )
 
