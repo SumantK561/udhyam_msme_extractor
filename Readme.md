@@ -1,6 +1,6 @@
 # Udyam MSME Extractor
 
-**Version 1.6.0**
+**Version 1.7.0**
 
 Production-grade Python pipeline for extracting MSME registered-unit data from the Government of India's Udyam dataset via the `data.gov.in` API. Designed for Supplier.io's supplier intelligence ingestion workflow.
 
@@ -32,6 +32,7 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Offset/limit pagination with short-page protection
 - State-level reconciliation (API total vs. persisted records)
 - Run-level reconciliation (all states completed + SUM check)
+- SHA-256 batch artifact integrity: checksum written to manifest on persist, verified on resume
 - Durable run summary artifact (`run_summary.json`) written atomically at end of every run
 - Structured per-execution log file
 - Process exit codes (`0` success / `1` failure)
@@ -94,6 +95,7 @@ Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Serv
 - Append-only batch manifest (`manifest.jsonl`)
 - Checkpoint-based resume at the batch level
 - Fail-closed on orphaned artifacts (CSV present but no manifest entry → hard stop)
+- SHA-256 checksum computed on every batch CSV and stored in the manifest; verified on resume
 - State-level and run-level reconciliation (API totals vs. persisted records)
 - Durable run summary artifact (`run_summary.json`) written atomically at end of every run
 - Per-execution log file
@@ -373,7 +375,7 @@ Example:
 
 ### Manifest
 
-`output/<run_id>/manifest.jsonl` — one line per successfully persisted batch:
+`output/<run_id>/manifest.jsonl` — one line per successfully persisted batch. The `checksum` field holds the SHA-256 hex digest of the batch CSV, computed immediately after the atomic write and verified against the file on resume:
 
 ```json
 {
@@ -383,6 +385,7 @@ Example:
     "offset": 0,
     "record_count": 10000,
     "batch_file": "output\\...\\ANDAMAN AND NICOBAR ISLANDS\\batches\\...csv",
+    "checksum": "a3f1c2d4e5b6...",
     "status": "SUCCESS",
     "persisted_at": "2026-09-12T16:50:54.146875+00:00"
 }
@@ -516,6 +519,14 @@ Thumbs.db
 
 ## Version History
 
+### 1.7.0 — SHA-256 batch artifact integrity
+
+- SHA-256 checksum (`hashlib`) computed on every batch CSV immediately after atomic write
+- Checksum stored in each `manifest.jsonl` entry as a new `checksum` field
+- `is_batch_artifact_valid` now performs cryptographic verification in addition to existence and size checks
+- Resume recovery enumerates six named failure reasons: `MissingBatchFile`, `BatchFileNotFound`, `BatchPathNotFile`, `BatchFileEmpty`, `MissingChecksum`, `ChecksumMismatch`
+- `calculate_file_sha256(path)` reads in 1 MB chunks for memory-efficient hashing of large batch files
+
 ### 1.6.0 — Durable run summary
 
 - Durable `run_summary.json` artifact written atomically at end of every run (success and failure paths)
@@ -553,7 +564,7 @@ Thumbs.db
 
 - The source API does not provide a stable record-level unique identifier for enterprises.
 - Current persistence format is CSV; Parquet / object-storage landing is planned.
-- Batch artifact validation verifies file existence and non-zero size only; record-level integrity checks are not performed at extraction time.
+- Batch artifact validation verifies file existence, non-zero size, and SHA-256 checksum against the manifest; record-level semantic integrity checks are not performed at extraction time.
 - Record-level duplicate detection is not performed by the extractor — deduplication belongs in a downstream Silver-layer transform.
 - API totals are used for extraction reconciliation but do not establish enterprise uniqueness.
 - Run metadata is represented through logs, checkpoints, the batch manifest, and `run_summary.json`; a dedicated upstream ingestion trigger based on this file is planned.
