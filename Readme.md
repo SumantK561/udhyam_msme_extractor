@@ -43,9 +43,10 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Bounded exponential backoff with configurable jitter and rate-limit delay
 - Automated pytest regression suite
 - Windows CI workflow for pull requests and pushes
+- Configurable RAW storage backend with direct Google Cloud Storage batch uploads
+- GCS object metadata carries the extractor SHA-256 for remote artifact validation
 
 ### Planned
-- Object-storage landing layer (raw CSV → cloud bucket)
 - Snowflake ingestion (RAW layer)
 - dbt Bronze / Silver / Gold transformations
 - Airflow orchestration and scheduling
@@ -85,7 +86,7 @@ Raw / Landing Storage
 BI / Analytics / ML
 ```
 
-Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Server) span all layers. The extractor currently implements the extraction and local persistence layer only.
+Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Server) span all layers. The extractor now supports both local persistence and direct GCS RAW publication; downstream Snowflake/dbt/Streamlit layers are being validated as the E2E vertical slice.
 
 ---
 
@@ -120,6 +121,7 @@ Udyam_MSME/
 ├── .gitignore
 ├── Readme.md
 ├── config.py                  # Environment-driven runtime configuration
+├── storage.py                 # Local/GCS RAW storage abstraction
 ├── requirements.txt
 ├── requirements-dev.txt
 ├── .env.example
@@ -155,7 +157,7 @@ Udyam_MSME/
 
 - **Python 3.10+** (Windows)
 - **`curl.exe`** — included in Windows 10/11; verify with `curl.exe --version`
-- Dependencies listed in `requirements.txt`
+- Dependencies listed in `requirements.txt` (`google-cloud-storage` is required for GCS mode)
 - Development/test dependencies listed in `requirements-dev.txt`
 
 ```powershell
@@ -207,6 +209,10 @@ Runtime configuration is centralized in `config.py` and can be supplied through 
 | `UDYAM_RETRY_JITTER` | `3` | Random retry jitter (seconds) |
 | `UDYAM_RATE_LIMIT_DELAY` | `30` | Minimum delay after HTTP 429 (seconds) |
 | `UDYAM_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
+| `UDYAM_STORAGE_BACKEND` | `local` | `local` or `gcs` |
+| `UDYAM_GCS_BUCKET` | — | Required for GCS mode; target RAW bucket |
+| `UDYAM_GCS_PREFIX` | `udyam/raw` | GCS RAW object prefix |
+| `UDYAM_GCS_PROJECT` | — | Optional GCP project used by the GCS client |
 
 `UDYAM_API_KEY` remains a required secret and must not be committed.
 
@@ -215,23 +221,55 @@ Use `.env.example` as the deployment template. The checked-in repository remains
 
 ---
 
+## GCS RAW Storage
+
+The extractor can publish each completed batch directly to Google Cloud Storage instead of retaining the final CSV locally. The local checkpoint remains authoritative for process recovery, while the batch manifest records the `gs://` object URI and SHA-256.
+
+Set:
+
+```env
+UDYAM_STORAGE_BACKEND=gcs
+UDYAM_GCS_BUCKET=prod_us_dataengineering
+UDYAM_GCS_PREFIX=udyam/raw
+```
+
+The GCS layout is:
+
+```text
+gs://<bucket>/udyam/raw/
+└── run_id=<run_id>/
+    ├── manifest.jsonl
+    ├── run_summary.json
+    └── state=<state>/batches/<batch_id>.csv
+```
+
+The extractor uses the Google Cloud Storage Python client and Application Default Credentials. Do not place service-account keys in the repository. For local development, authenticate with your organization's approved GCP method before enabling GCS mode.
+
+Each batch upload uses a create-only generation precondition, GCS transport checksum verification, object-size verification, and the extractor SHA-256 stored in object metadata. A resumed run validates the remote object's presence, size, and stored SHA-256 before skipping an already completed batch.
+
 ## Running the Pipeline
 
 ### Single state (for testing)
 
+```python
+# in run_udyam.py
+TEST_STATE = "BIHAR"
+```
+
 ```powershell
-$env:UDYAM_TEST_STATE = "BIHAR"
 python .\run_udyam.py
 ```
 
 ### Full extraction (all states)
 
-```powershell
-$env:UDYAM_TEST_STATE = "ALL"
-python .\run_udyam.py
+```python
+# in run_udyam.py
+TEST_STATE = None
 ```
 
-Or set `UDYAM_TEST_STATE=ALL` in `.env` for a persistent configuration.
+```powershell
+python .\run_udyam.py
+```
 
 ### Resume a specific run
 
@@ -451,27 +489,16 @@ Example:
     "started_at": "2026-09-12T16:50:20+00:00",
     "completed_at": "2026-09-12T16:51:25+00:00",
     "requested_states": 32,
-    "completed_states": 31,
-    "failed_states": 1,
+    "completed_states": 32,
+    "failed_states": 0,
     "expected_records": 43417872,
-    "actual_records": 43399814,
-    "reconciliation_status": "FAILED",
-    "run_status": "FAILED",
-    "failures": [
-        {
-            "state": "MAHARASHTRA",
-            "failure_reason": "RETRY_EXHAUSTED",
-            "failure_stage": "API_FETCH",
-            "failure_detail": "Failed to fetch state=MAHARASHTRA offset=...",
-            "retry_count": 5,
-            "http_status": 503,
-            "failed_at": "2026-09-12T16:51:10+00:00"
-        }
-    ]
+    "actual_records": 43417872,
+    "reconciliation_status": "PASSED",
+    "run_status": "COMPLETED"
 }
 ```
 
-`reconciliation_status` is `"PASSED"` or `"FAILED"`. `run_status` is `"COMPLETED"` or `"FAILED"` — a run with any failed states is always `"FAILED"` regardless of reconciliation outcome. The `failures` array contains one entry per failed state with structured machine-readable failure metadata. The file uses the same atomic temp-write → `fsync` → replace pattern as batch CSVs and checkpoints.
+`reconciliation_status` is `"PASSED"` or `"FAILED"`. `run_status` is `"COMPLETED"` or `"FAILED"`. The file uses the same atomic temp-write → `fsync` → replace pattern as batch CSVs and checkpoints.
 
 ---
 
@@ -495,28 +522,26 @@ Total elapsed time=00:02:35
 
 Before running the full 43M-record extraction:
 
-1. Run the preflight script: `.\scripts\preflight.ps1`
-2. Run the test suite: `python -m pytest -q`
-3. Run a single state: `$env:UDYAM_TEST_STATE = "BIHAR"` then `python .\run_udyam.py`
-4. Validate generated CSVs — row counts, column completeness, `Activities` JSON
-5. Confirm record counts match the API `total` field in the log and `run_summary.json`
-6. Review log for timeout frequency
-7. Test checkpoint and resume: kill mid-run, re-run with the same `UDYAM_RUN_ID`
-8. Confirm `run_summary.json` reports `run_status: "COMPLETED"` and `reconciliation_status: "PASSED"`
-9. Then set `UDYAM_TEST_STATE=ALL` and run all states
+1. Run a single state: `TEST_STATE = "BIHAR"`
+2. Validate generated CSVs — row counts, column completeness, `Activities` JSON
+3. Confirm record counts match the API `total` field
+4. Review log for timeout frequency
+5. Check checkpoint and resume behavior (kill mid-run, re-run with same `UDYAM_RUN_ID`)
+6. Confirm output directory structure
+7. Then set `TEST_STATE = None` and run all states
 
-Recommended `.env` for initial validation:
+Recommended initial config:
 
-```env
-UDYAM_TEST_STATE=BIHAR
-UDYAM_MAX_WORKERS=3
+```python
+TEST_STATE  = "BIHAR"
+MAX_WORKERS = 3
 ```
 
 After validation:
 
-```env
-UDYAM_TEST_STATE=ALL
-UDYAM_MAX_WORKERS=3
+```python
+TEST_STATE  = None
+MAX_WORKERS = 3   # increase gradually if API is stable
 ```
 
 ---
@@ -529,10 +554,10 @@ UDYAM_MAX_WORKERS=3
 CURL FAILURE | ReturnCode=28
 ```
 
-Automatic retry will handle transient timeouts. If timeouts are frequent, reduce `UDYAM_MAX_WORKERS` in `.env`:
+Automatic retry will handle transient timeouts. If timeouts are frequent, reduce `MAX_WORKERS`:
 
-```env
-UDYAM_MAX_WORKERS=2
+```python
+MAX_WORKERS = 2
 ```
 
 ### Missing API key
@@ -661,12 +686,12 @@ Thumbs.db
 ## Known Limitations
 
 - The source API does not provide a stable record-level unique identifier for enterprises.
-- Current persistence format is CSV; Parquet / object-storage landing is planned.
+- Current RAW persistence format is CSV. Parquet can be introduced later without changing the extraction contract.
 - Batch artifact validation verifies file existence, non-zero size, and SHA-256 checksum against the manifest; record-level semantic integrity checks are not performed at extraction time.
 - Record-level duplicate detection is not performed by the extractor — deduplication belongs in a downstream Silver-layer transform.
 - API totals are used for extraction reconciliation but do not establish enterprise uniqueness.
-- Run metadata is represented through logs, checkpoints, the batch manifest, and `run_summary.json`; a dedicated upstream ingestion trigger based on this file is planned.
-- CI (GitHub Actions, Windows runner) validates code on every push and PR; CD deployment to the production Windows Server is a separate planned phase.
+- Run metadata is represented through logs, checkpoints, the batch manifest, and `run_summary.json`; a downstream Snowflake ingestion step is the next E2E layer.
+- The extractor runs directly on Windows and is not yet deployed through CI/CD.
 - `MAX_WORKERS` concurrency is bounded by Udyam API stability, not local resources — increasing it without validating API behavior can cause widespread timeouts.
 
 ---

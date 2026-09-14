@@ -206,3 +206,57 @@ def test_run_summary_contains_failures():
 
     assert summary["failures"][0]["failure_reason"] == "RETRY_EXHAUSTED"
     assert summary["run_status"] == "FAILED"
+
+
+def test_gcs_storage_configuration(monkeypatch):
+    monkeypatch.setenv("UDYAM_STORAGE_BACKEND", "gcs")
+    monkeypatch.setenv("UDYAM_GCS_BUCKET", "prod_us_dataengineering")
+    settings = load_settings()
+    assert settings.storage_backend == "gcs"
+    assert settings.gcs_bucket == "prod_us_dataengineering"
+
+
+def test_gcs_storage_requires_bucket(monkeypatch):
+    monkeypatch.setenv("UDYAM_STORAGE_BACKEND", "gcs")
+    monkeypatch.setenv("UDYAM_GCS_BUCKET", "")
+    with pytest.raises(ValueError, match="UDYAM_GCS_BUCKET"):
+        load_settings()
+
+
+def test_local_storage_validates_checksum(tmp_path):
+    from storage import LocalStorage
+    path = tmp_path / "batch.csv"
+    path.write_bytes(b"abc")
+    record = {
+        "batch_file": str(path),
+        "checksum": extractor.calculate_file_sha256(path),
+    }
+    valid, reason = LocalStorage().validate_artifact(record, extractor.calculate_file_sha256)
+    assert valid is True
+    assert reason == ""
+
+    path.write_bytes(b"tampered")
+    valid, reason = LocalStorage().validate_artifact(record, extractor.calculate_file_sha256)
+    assert valid is False
+    assert reason == "ChecksumMismatch"
+
+
+def test_gcs_object_layout():
+    from storage import GCSStorage
+
+    backend = GCSStorage.__new__(GCSStorage)
+    backend.bucket_name = "prod_us_dataengineering"
+    backend.prefix = "udyam/raw"
+
+    object_name = backend._object_name(
+        "RUN1",
+        "ANDAMAN AND NICOBAR ISLANDS",
+        "RUN1_ANDAMAN AND NICOBAR ISLANDS_0.csv",
+        batch=True,
+    )
+
+    assert object_name == (
+        "udyam/raw/run_id=RUN1/"
+        "state=ANDAMAN AND NICOBAR ISLANDS/batches/"
+        "RUN1_ANDAMAN AND NICOBAR ISLANDS_0.csv"
+    )
