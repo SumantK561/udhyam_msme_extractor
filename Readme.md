@@ -219,25 +219,19 @@ Use `.env.example` as the deployment template. The checked-in repository remains
 
 ### Single state (for testing)
 
-```python
-# in run_udyam.py
-TEST_STATE = "BIHAR"
-```
-
 ```powershell
+$env:UDYAM_TEST_STATE = "BIHAR"
 python .\run_udyam.py
 ```
 
 ### Full extraction (all states)
 
-```python
-# in run_udyam.py
-TEST_STATE = None
-```
-
 ```powershell
+$env:UDYAM_TEST_STATE = "ALL"
 python .\run_udyam.py
 ```
+
+Or set `UDYAM_TEST_STATE=ALL` in `.env` for a persistent configuration.
 
 ### Resume a specific run
 
@@ -457,16 +451,27 @@ Example:
     "started_at": "2026-09-12T16:50:20+00:00",
     "completed_at": "2026-09-12T16:51:25+00:00",
     "requested_states": 32,
-    "completed_states": 32,
-    "failed_states": 0,
+    "completed_states": 31,
+    "failed_states": 1,
     "expected_records": 43417872,
-    "actual_records": 43417872,
-    "reconciliation_status": "PASSED",
-    "run_status": "COMPLETED"
+    "actual_records": 43399814,
+    "reconciliation_status": "FAILED",
+    "run_status": "FAILED",
+    "failures": [
+        {
+            "state": "MAHARASHTRA",
+            "failure_reason": "RETRY_EXHAUSTED",
+            "failure_stage": "API_FETCH",
+            "failure_detail": "Failed to fetch state=MAHARASHTRA offset=...",
+            "retry_count": 5,
+            "http_status": 503,
+            "failed_at": "2026-09-12T16:51:10+00:00"
+        }
+    ]
 }
 ```
 
-`reconciliation_status` is `"PASSED"` or `"FAILED"`. `run_status` is `"COMPLETED"` or `"FAILED"`. The file uses the same atomic temp-write → `fsync` → replace pattern as batch CSVs and checkpoints.
+`reconciliation_status` is `"PASSED"` or `"FAILED"`. `run_status` is `"COMPLETED"` or `"FAILED"` — a run with any failed states is always `"FAILED"` regardless of reconciliation outcome. The `failures` array contains one entry per failed state with structured machine-readable failure metadata. The file uses the same atomic temp-write → `fsync` → replace pattern as batch CSVs and checkpoints.
 
 ---
 
@@ -490,26 +495,28 @@ Total elapsed time=00:02:35
 
 Before running the full 43M-record extraction:
 
-1. Run a single state: `TEST_STATE = "BIHAR"`
-2. Validate generated CSVs — row counts, column completeness, `Activities` JSON
-3. Confirm record counts match the API `total` field
-4. Review log for timeout frequency
-5. Check checkpoint and resume behavior (kill mid-run, re-run with same `UDYAM_RUN_ID`)
-6. Confirm output directory structure
-7. Then set `TEST_STATE = None` and run all states
+1. Run the preflight script: `.\scripts\preflight.ps1`
+2. Run the test suite: `python -m pytest -q`
+3. Run a single state: `$env:UDYAM_TEST_STATE = "BIHAR"` then `python .\run_udyam.py`
+4. Validate generated CSVs — row counts, column completeness, `Activities` JSON
+5. Confirm record counts match the API `total` field in the log and `run_summary.json`
+6. Review log for timeout frequency
+7. Test checkpoint and resume: kill mid-run, re-run with the same `UDYAM_RUN_ID`
+8. Confirm `run_summary.json` reports `run_status: "COMPLETED"` and `reconciliation_status: "PASSED"`
+9. Then set `UDYAM_TEST_STATE=ALL` and run all states
 
-Recommended initial config:
+Recommended `.env` for initial validation:
 
-```python
-TEST_STATE  = "BIHAR"
-MAX_WORKERS = 3
+```env
+UDYAM_TEST_STATE=BIHAR
+UDYAM_MAX_WORKERS=3
 ```
 
 After validation:
 
-```python
-TEST_STATE  = None
-MAX_WORKERS = 3   # increase gradually if API is stable
+```env
+UDYAM_TEST_STATE=ALL
+UDYAM_MAX_WORKERS=3
 ```
 
 ---
@@ -522,10 +529,10 @@ MAX_WORKERS = 3   # increase gradually if API is stable
 CURL FAILURE | ReturnCode=28
 ```
 
-Automatic retry will handle transient timeouts. If timeouts are frequent, reduce `MAX_WORKERS`:
+Automatic retry will handle transient timeouts. If timeouts are frequent, reduce `UDYAM_MAX_WORKERS` in `.env`:
 
-```python
-MAX_WORKERS = 2
+```env
+UDYAM_MAX_WORKERS=2
 ```
 
 ### Missing API key
@@ -659,7 +666,7 @@ Thumbs.db
 - Record-level duplicate detection is not performed by the extractor — deduplication belongs in a downstream Silver-layer transform.
 - API totals are used for extraction reconciliation but do not establish enterprise uniqueness.
 - Run metadata is represented through logs, checkpoints, the batch manifest, and `run_summary.json`; a dedicated upstream ingestion trigger based on this file is planned.
-- The extractor runs directly on Windows and is not yet deployed through CI/CD.
+- CI (GitHub Actions, Windows runner) validates code on every push and PR; CD deployment to the production Windows Server is a separate planned phase.
 - `MAX_WORKERS` concurrency is bounded by Udyam API stability, not local resources — increasing it without validating API behavior can cause widespread timeouts.
 
 ---
