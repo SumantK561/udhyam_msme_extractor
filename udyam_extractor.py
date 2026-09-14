@@ -10,10 +10,14 @@ import time
 import threading
 import hashlib
 
+from dataclasses import dataclass
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
+
+from config import load_settings
 
 
 BASE_URL = (
@@ -21,10 +25,18 @@ BASE_URL = (
     "8b68ae56-84cf-4728-a0a6-1be11028dea7"
 )
 
-BATCH_SIZE = 10000
-MAX_RETRIES = 5
-CONNECT_TIMEOUT = 30
-MAX_REQUEST_TIME = 300
+SETTINGS = load_settings()
+
+BATCH_SIZE = SETTINGS.batch_size
+MAX_RETRIES = SETTINGS.max_retries
+CONNECT_TIMEOUT = SETTINGS.connect_timeout
+MAX_REQUEST_TIME = SETTINGS.max_request_time
+RETRY_BACKOFF_BASE = SETTINGS.retry_backoff_base
+RETRY_BACKOFF_MAX = SETTINGS.retry_backoff_max
+RETRY_JITTER = SETTINGS.retry_jitter
+RATE_LIMIT_DELAY = SETTINGS.rate_limit_delay
+
+RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 
 OUTPUT_ROOT = Path("output")
 CHECKPOINT_ROOT = Path("checkpoints")
@@ -51,12 +63,61 @@ CSV_HEADERS = [
 # to the same run-level manifest.jsonl.
 MANIFEST_LOCK = threading.Lock()
 
+# A shutdown request is cooperative: the current HTTP call is allowed to finish,
+# then workers stop before starting another batch.
+SHUTDOWN_EVENT = threading.Event()
+
+
+class ExtractionError(Exception):
+    """Machine-readable extraction failure."""
+
+    def __init__(
+        self,
+        reason,
+        stage,
+        detail="",
+        retry_count=0,
+        http_status=None,
+    ):
+        super().__init__(detail or reason)
+        self.reason = reason
+        self.stage = stage
+        self.detail = detail
+        self.retry_count = retry_count
+        self.http_status = http_status
+
+
+class ShutdownRequested(ExtractionError):
+    """Raised when a graceful process shutdown has been requested."""
+
+    def __init__(self):
+        super().__init__(
+            reason="SHUTDOWN_REQUESTED",
+            stage="SHUTDOWN",
+            detail="Process shutdown requested",
+        )
+
+
+def request_shutdown():
+    """Request cooperative shutdown of extraction workers."""
+    SHUTDOWN_EVENT.set()
+
+
+def reset_shutdown():
+    """Reset the shutdown event for tests or a new in-process run."""
+    SHUTDOWN_EVENT.clear()
+
+
+def is_shutdown_requested():
+    """Return True when a graceful shutdown has been requested."""
+    return SHUTDOWN_EVENT.is_set()
+
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
-def setup_logger():
+def setup_logger(log_level=None):
     import logging
 
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
@@ -66,7 +127,8 @@ def setup_logger():
     )
 
     logger = logging.getLogger("udyam")
-    logger.setLevel(logging.INFO)
+    level_name = (log_level or SETTINGS.log_level).upper()
+    logger.setLevel(getattr(logging, level_name))
     logger.handlers.clear()
 
     fmt = logging.Formatter(
@@ -635,21 +697,18 @@ def fetch_batch(
         f"&filters%5BState%5D={quote(state)}"
     )
 
-    for attempt in range(
-        1,
-        MAX_RETRIES + 1,
-    ):
+    for attempt in range(1, MAX_RETRIES + 1):
+        if is_shutdown_requested():
+            raise ShutdownRequested()
 
         temp_path = None
         started = time.perf_counter()
 
         try:
-
             with tempfile.NamedTemporaryFile(
                 delete=False,
                 suffix=".json",
             ) as file:
-
                 temp_path = file.name
 
             cmd = [
@@ -664,6 +723,8 @@ def fetch_batch(
                 "accept: application/json",
                 "-o",
                 temp_path,
+                "-w",
+                "%{http_code}",
                 url,
             ]
 
@@ -675,90 +736,81 @@ def fetch_batch(
                 errors="replace",
             )
 
-            elapsed = (
-                time.perf_counter()
-                - started
-            )
+            elapsed = time.perf_counter() - started
+
+            try:
+                http_status = int((result.stdout or "").strip() or "0")
+            except ValueError:
+                http_status = 0
 
             if result.returncode:
-
+                detail = result.stderr.strip() or "curl request failed"
                 logger.error(
-                    "CURL FAILURE | "
-                    "State=%s | "
-                    "Offset=%s | "
-                    "ReturnCode=%s | "
-                    "Elapsed=%s | "
-                    "Error=%s",
+                    "CURL FAILURE | State=%s | Offset=%s | "
+                    "ReturnCode=%s | HTTPStatus=%s | Elapsed=%s | Error=%s",
                     state,
                     offset,
                     result.returncode,
+                    http_status or "N/A",
                     format_elapsed(elapsed),
-                    result.stderr.strip(),
+                    detail,
                 )
-
+                failure_reason = (
+                    "TIMEOUT"
+                    if result.returncode == 28
+                    else "CURL_REQUEST_FAILED"
+                )
+            elif http_status in RETRYABLE_HTTP_STATUS_CODES:
+                logger.warning(
+                    "API RETRYABLE HTTP ERROR | State=%s | Offset=%s | "
+                    "HTTPStatus=%s | Attempt=%s/%s",
+                    state,
+                    offset,
+                    http_status,
+                    attempt,
+                    MAX_RETRIES,
+                )
+                failure_reason = "RATE_LIMITED" if http_status == 429 else "HTTP_5XX"
+            elif http_status >= 400:
+                detail = result.stderr.strip() or f"HTTP {http_status}"
+                raise ExtractionError(
+                    reason="HTTP_CLIENT_ERROR",
+                    stage="API_FETCH",
+                    detail=detail,
+                    retry_count=attempt - 1,
+                    http_status=http_status,
+                )
             else:
-
                 try:
-
                     data = json.loads(
-                        Path(
-                            temp_path
-                        ).read_text(
+                        Path(temp_path).read_text(
                             encoding="utf-8"
                         )
                     )
 
                     if data.get("status") == "ok":
-
-                        records = (
-                            data.get("records")
-                            or []
-                        )
-
+                        records = data.get("records") or []
                         count = len(records)
-
-                        total = int(
-                            data.get("total")
-                            or 0
-                        )
+                        total = int(data.get("total") or 0)
 
                         logger.info(
-                            "API RESPONSE | "
-                            "State=%s | "
-                            "Offset=%s | "
-                            "Count=%s | "
-                            "Total=%s | "
-                            "Elapsed=%s",
+                            "API RESPONSE | State=%s | Offset=%s | "
+                            "Count=%s | Total=%s | HTTPStatus=%s | Elapsed=%s",
                             state,
                             offset,
                             count,
                             total,
-                            format_elapsed(
-                                elapsed
-                            ),
+                            http_status,
+                            format_elapsed(elapsed),
                         )
-
-                        # -------------------------------------------------------------------
-                        # Short-page protection
-                        # -------------------------------------------------------------------
-                        #
-                        # A page smaller than BATCH_SIZE is only valid when it
-                        # reaches the end of the dataset. If more records remain,
-                        # retry the exact same offset instead of advancing.
-                        # -------------------------------------------------------------------
 
                         if (
                             count < BATCH_SIZE
                             and offset + count < total
                         ):
-
                             logger.warning(
-                                "SHORT API PAGE | "
-                                "State=%s | "
-                                "Offset=%s | "
-                                "Count=%s | "
-                                "Total=%s | "
-                                "ExpectedAtLeast=%s | "
+                                "SHORT API PAGE | State=%s | Offset=%s | "
+                                "Count=%s | Total=%s | ExpectedAtLeast=%s | "
                                 "RetryingSameOffset",
                                 state,
                                 offset,
@@ -766,83 +818,73 @@ def fetch_batch(
                                 total,
                                 BATCH_SIZE,
                             )
+                            failure_reason = "SHORT_PAGE"
+                        else:
+                            return data
 
-                            continue
-
-                        return data
-
-                    logger.error(
-                        "API ERROR | "
-                        "State=%s | "
-                        "Offset=%s | "
-                        "Response=%s",
-                        state,
-                        offset,
-                        json.dumps(data)[:1000],
-                    )
+                    else:
+                        logger.error(
+                            "API ERROR | State=%s | Offset=%s | Response=%s",
+                            state,
+                            offset,
+                            json.dumps(data)[:1000],
+                        )
+                        failure_reason = "API_RESPONSE_ERROR"
 
                 except (
                     json.JSONDecodeError,
                     OSError,
                 ) as exc:
-
                     logger.error(
-                        "INVALID API RESPONSE | "
-                        "State=%s | "
-                        "Offset=%s | "
-                        "Error=%s",
+                        "INVALID API RESPONSE | State=%s | Offset=%s | Error=%s",
                         state,
                         offset,
                         exc,
                     )
+                    failure_reason = "INVALID_API_RESPONSE"
 
         finally:
-
             if temp_path:
-
                 try:
-                    os.remove(
-                        temp_path
-                    )
-
+                    os.remove(temp_path)
                 except OSError:
                     pass
 
-        if attempt < MAX_RETRIES:
+        if is_shutdown_requested():
+            raise ShutdownRequested()
 
-            delay = (
-                min(
-                    60,
-                    5 * (
-                        2 ** (
-                            attempt - 1
-                        )
-                    ),
-                )
-                + random.uniform(0, 3)
-            )
+        if attempt < MAX_RETRIES:
+            delay = min(
+                RETRY_BACKOFF_MAX,
+                RETRY_BACKOFF_BASE * (2 ** (attempt - 1)),
+            ) + random.uniform(0, RETRY_JITTER)
+
+            # A 429 should honor a conservative delay; other transient failures
+            # use the same bounded exponential backoff.
+            if failure_reason == "RATE_LIMITED":
+                delay = max(delay, RATE_LIMIT_DELAY)
 
             logger.warning(
-                "RETRYING | "
-                "State=%s | "
-                "Offset=%s | "
-                "RetryIn=%.1f seconds",
+                "RETRYING | State=%s | Offset=%s | Reason=%s | "
+                "Attempt=%s/%s | RetryIn=%.1f seconds",
                 state,
                 offset,
+                failure_reason,
+                attempt,
+                MAX_RETRIES,
                 delay,
             )
 
-            time.sleep(delay)
+            if SHUTDOWN_EVENT.wait(delay):
+                raise ShutdownRequested()
 
-    logger.error(
-        "API REQUEST FAILED AFTER RETRIES | "
-        "State=%s | "
-        "Offset=%s",
-        state,
-        offset,
+    raise ExtractionError(
+        reason="RETRY_EXHAUSTED",
+        stage="API_FETCH",
+        detail=f"Failed to fetch state={state}, offset={offset}",
+        retry_count=MAX_RETRIES,
+        http_status=http_status if "http_status" in locals() else None,
     )
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -910,6 +952,51 @@ def write_batch_file(
 # ---------------------------------------------------------------------------
 # State extraction
 # ---------------------------------------------------------------------------
+
+def mark_state_failed(
+    cp,
+    run_id,
+    state,
+    logger,
+    reason,
+    stage,
+    detail="",
+    retry_count=0,
+    http_status=None,
+):
+    """Persist structured failure metadata and return the failed checkpoint."""
+    failed_at = datetime.now(timezone.utc).isoformat()
+
+    cp.update(
+        {
+            "run_id": run_id,
+            "state": state,
+            "status": "FAILED",
+            "last_completed_offset": int(cp.get("last_completed_offset", 0)),
+            "records_written": int(cp.get("records_written", 0)),
+            "total_records": cp.get("total_records"),
+            "failure_reason": reason,
+            "failure_stage": stage,
+            "failure_detail": detail[:2000] if detail else "",
+            "retry_count": retry_count,
+            "http_status": http_status,
+            "failed_at": failed_at,
+        }
+    )
+    save_checkpoint(run_id, state, cp)
+
+    logger.error(
+        "STATE FAILED | State=%s | Reason=%s | Stage=%s | "
+        "RetryCount=%s | HTTPStatus=%s | Detail=%s",
+        state,
+        reason,
+        stage,
+        retry_count,
+        http_status if http_status is not None else "N/A",
+        detail[:500] if detail else "",
+    )
+    return cp
+
 
 def extract_state(
     api_key,
@@ -982,6 +1069,12 @@ def extract_state(
             "last_completed_offset": offset,
             "records_written": written,
             "total_records": total,
+            "failure_reason": None,
+            "failure_stage": None,
+            "failure_detail": "",
+            "retry_count": 0,
+            "http_status": None,
+            "failed_at": None,
         }
     )
 
@@ -1015,6 +1108,16 @@ def extract_state(
 
     while True:
 
+        if is_shutdown_requested():
+            return mark_state_failed(
+                cp,
+                run_id,
+                state,
+                logger,
+                reason="SHUTDOWN_REQUESTED",
+                stage="SHUTDOWN",
+            )
+
         batch_start = time.perf_counter()
 
         # -------------------------------------------------------------------
@@ -1023,6 +1126,16 @@ def extract_state(
         # Before calling the API, determine whether this exact
         # run/state/offset batch has already been persisted.
         # -------------------------------------------------------------------
+
+        if is_shutdown_requested():
+            return mark_state_failed(
+                cp,
+                run_id,
+                state,
+                logger,
+                reason="SHUTDOWN_REQUESTED",
+                stage="SHUTDOWN",
+            )
 
         persisted_batch = get_persisted_batch(
             run_id,
@@ -1234,46 +1347,25 @@ def extract_state(
         # Fetch next batch
         # -------------------------------------------------------------------
 
-        data = fetch_batch(
-            api_key,
-            state,
-            offset,
-            logger,
-        )
-
-        if data is None:
-
-            cp.update(
-                {
-                    "status": "FAILED",
-                    "last_completed_offset": offset,
-                    "records_written": written,
-                    "total_records": total,
-                }
+        try:
+            data = fetch_batch(
+                api_key,
+                state,
+                offset,
+                logger,
             )
-
-            save_checkpoint(
+        except ExtractionError as exc:
+            return mark_state_failed(
+                cp,
                 run_id,
                 state,
-                cp,
+                logger,
+                reason=exc.reason,
+                stage=exc.stage,
+                detail=exc.detail,
+                retry_count=exc.retry_count,
+                http_status=exc.http_status,
             )
-
-            logger.error(
-                "STATE FAILED | "
-                "State=%s | "
-                "RecordsWritten=%s | "
-                "LastCompletedOffset=%s | "
-                "Elapsed=%s",
-                state,
-                written,
-                offset,
-                format_elapsed(
-                    time.perf_counter()
-                    - started
-                ),
-            )
-
-            return cp
 
         # -------------------------------------------------------------------
         # Capture total
@@ -1639,12 +1731,17 @@ def extract_states(
                     exc,
                 )
 
+                cp = load_checkpoint(run_id, state)
                 results.append(
-                    {
-                        "state": state,
-                        "status": "FAILED",
-                        "records_written": 0,
-                    }
+                    mark_state_failed(
+                        cp,
+                        run_id,
+                        state,
+                        logger,
+                        reason="UNHANDLED_EXCEPTION",
+                        stage="STATE_EXTRACTION",
+                        detail=str(exc),
+                    )
                 )
 
     return results
