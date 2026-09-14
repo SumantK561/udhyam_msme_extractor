@@ -230,6 +230,70 @@ def get_manifest_path(
 
     return run_dir / "manifest.jsonl"
 
+def get_run_summary_path(
+    run_id: str,
+) -> Path:
+    """
+    Return the durable run summary path for an extraction run.
+    """
+
+    run_dir = OUTPUT_ROOT / run_id
+
+    run_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    return run_dir / "run_summary.json"
+
+
+def write_run_summary(
+    run_id: str,
+    summary: dict,
+) -> None:
+    """
+    Atomically persist the final run-level summary.
+
+    The summary is written to a temporary file, flushed to disk,
+    fsynced, and then atomically replaced.
+    """
+
+    path = get_run_summary_path(run_id)
+
+    temp_path = path.with_suffix(".tmp")
+
+    payload = json.dumps(
+        summary,
+        indent=4,
+        ensure_ascii=False,
+    )
+
+    try:
+        with temp_path.open(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+        ) as file:
+
+            file.write(payload)
+
+            file.flush()
+
+            os.fsync(
+                file.fileno()
+            )
+
+        temp_path.replace(path)
+
+    except Exception:
+        try:
+            temp_path.unlink(
+                missing_ok=True
+            )
+        except OSError:
+            pass
+
+        raise
 
 def write_batch_manifest(
     run_id: str,

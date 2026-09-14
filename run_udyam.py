@@ -3,6 +3,8 @@
 import os
 import time
 
+from datetime import datetime, timezone
+
 from dotenv import load_dotenv
 
 from udyam_extractor import (
@@ -10,7 +12,9 @@ from udyam_extractor import (
     extract_states,
     format_elapsed,
     get_run_id,
+    get_run_summary_path,
     setup_logger,
+    write_run_summary,
 )
 
 
@@ -144,11 +148,50 @@ def reconcile_run(results, logger) -> bool:
 
     return True
 
+def build_run_summary(
+    run_id,
+    started_at,
+    completed_at,
+    states,
+    results,
+    expected_records,
+    actual_records,
+    reconciliation_status,
+    run_status,
+):
+    """
+    Build the durable run-level summary.
+    """
+
+    completed_states = sum(
+        r.get("status") == "COMPLETED"
+        for r in results
+    )
+
+    failed_states = sum(
+        r.get("status") == "FAILED"
+        for r in results
+    )
+
+    return {
+        "run_id": run_id,
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "requested_states": len(states),
+        "completed_states": completed_states,
+        "failed_states": failed_states,
+        "expected_records": expected_records,
+        "actual_records": actual_records,
+        "reconciliation_status": reconciliation_status,
+        "run_status": run_status,
+    }
 
 def main() -> bool:
     load_dotenv()
 
     logger = setup_logger()
+
+    started_at = datetime.now(timezone.utc)
     started = time.perf_counter()
 
     configured_run_id = os.getenv("UDYAM_RUN_ID")
@@ -259,7 +302,23 @@ def main() -> bool:
         logger,
     )
 
+    expected_records = sum(
+        int(r.get("total_records") or 0)
+        for r in results
+    )
+
+    actual_records = records
+
+    completed_at = datetime.now(timezone.utc)
+
     if failed:
+        run_status = "FAILED"
+        reconciliation_status = (
+            "PASSED"
+            if run_reconciled
+            else "FAILED"
+        )
+
         logger.error(
             "RUN FAILED | "
             "Reason=StateFailure | "
@@ -273,15 +332,90 @@ def main() -> bool:
             failed,
         )
 
+        summary = build_run_summary(
+            run_id=run_id,
+            started_at=started_at,
+            completed_at=completed_at,
+            states=states,
+            results=results,
+            expected_records=expected_records,
+            actual_records=actual_records,
+            reconciliation_status=reconciliation_status,
+            run_status=run_status,
+        )
+
+        write_run_summary(
+            run_id=run_id,
+            summary=summary,
+        )
+
+        logger.info(
+            "RUN SUMMARY WRITTEN | "
+            "Path=%s",
+            get_run_summary_path(run_id),
+        )
+
         return False
 
     if not run_reconciled:
+        run_status = "FAILED"
+        reconciliation_status = "FAILED"
+
         logger.error(
             "RUN FAILED | "
             "Reason=RunReconciliationFailure"
         )
 
+        summary = build_run_summary(
+            run_id=run_id,
+            started_at=started_at,
+            completed_at=completed_at,
+            states=states,
+            results=results,
+            expected_records=expected_records,
+            actual_records=actual_records,
+            reconciliation_status=reconciliation_status,
+            run_status=run_status,
+        )
+
+        write_run_summary(
+            run_id=run_id,
+            summary=summary,
+        )
+
+        logger.info(
+            "RUN SUMMARY WRITTEN | "
+            "Path=%s",
+            get_run_summary_path(run_id),
+        )
+
         return False
+
+    run_status = "COMPLETED"
+    reconciliation_status = "PASSED"
+
+    summary = build_run_summary(
+        run_id=run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        states=states,
+        results=results,
+        expected_records=expected_records,
+        actual_records=actual_records,
+        reconciliation_status=reconciliation_status,
+        run_status=run_status,
+    )
+
+    write_run_summary(
+        run_id=run_id,
+        summary=summary,
+    )
+
+    logger.info(
+        "RUN SUMMARY WRITTEN | "
+        "Path=%s",
+        get_run_summary_path(run_id),
+    )
 
     logger.info(
         "RUN COMPLETED | "
