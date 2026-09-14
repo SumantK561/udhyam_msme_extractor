@@ -1,6 +1,6 @@
 # Udyam MSME Extractor
 
-**Version 1.6.0**
+**Version 2.0.0**
 
 Production-grade Python pipeline for extracting MSME registered-unit data from the Government of India's Udyam dataset via the `data.gov.in` API. Designed for Supplier.io's supplier intelligence ingestion workflow.
 
@@ -32,16 +32,24 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Offset/limit pagination with short-page protection
 - State-level reconciliation (API total vs. persisted records)
 - Run-level reconciliation (all states completed + SUM check)
+- SHA-256 batch artifact integrity: checksum written to manifest on persist, verified on resume
 - Durable run summary artifact (`run_summary.json`) written atomically at end of every run
 - Structured per-execution log file
 - Process exit codes (`0` success / `1` failure)
+- Structured failure metadata in checkpoints and run summaries
+- Centralized environment-driven runtime configuration with validation
+- Graceful SIGINT/SIGTERM shutdown with resumable checkpoints
+- Retry classification for curl failures, HTTP 429, and transient HTTP 5xx responses
+- Bounded exponential backoff with configurable jitter and rate-limit delay
+- Automated pytest regression suite
+- Windows CI workflow for pull requests and pushes
 
 ### Planned
 - Object-storage landing layer (raw CSV → cloud bucket)
 - Snowflake ingestion (RAW layer)
 - dbt Bronze / Silver / Gold transformations
 - Airflow orchestration and scheduling
-- CI/CD deployment pipeline
+- CD deployment pipeline to the production Windows Server
 - Monitoring and alerting
 - Data-quality framework
 - Data lineage and governance
@@ -94,6 +102,7 @@ Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Serv
 - Append-only batch manifest (`manifest.jsonl`)
 - Checkpoint-based resume at the batch level
 - Fail-closed on orphaned artifacts (CSV present but no manifest entry → hard stop)
+- SHA-256 checksum computed on every batch CSV and stored in the manifest; verified on resume
 - State-level and run-level reconciliation (API totals vs. persisted records)
 - Durable run summary artifact (`run_summary.json`) written atomically at end of every run
 - Per-execution log file
@@ -110,6 +119,17 @@ Udyam_MSME/
 ├── .env                      # API key (not committed)
 ├── .gitignore
 ├── Readme.md
+├── config.py                  # Environment-driven runtime configuration
+├── requirements.txt
+├── requirements-dev.txt
+├── .env.example
+├── .github/
+│   └── workflows/
+│       └── ci.yml             # Automated Windows CI
+├── scripts/
+│   └── preflight.ps1          # Production host readiness checks
+├── tests/
+│   └── test_production_hardening.py
 │
 ├── output/                   # Runtime — not committed
 │   └── <run_id>/
@@ -135,10 +155,17 @@ Udyam_MSME/
 
 - **Python 3.10+** (Windows)
 - **`curl.exe`** — included in Windows 10/11; verify with `curl.exe --version`
-- **`python-dotenv`** — the only third-party Python dependency
+- Dependencies listed in `requirements.txt`
+- Development/test dependencies listed in `requirements-dev.txt`
 
 ```powershell
-pip install python-dotenv
+pip install -r requirements.txt
+```
+
+For development and CI:
+
+```powershell
+pip install -r requirements-dev.txt
 ```
 
 ---
@@ -165,23 +192,26 @@ curl.exe --version
 
 ## Configuration
 
-All runtime configuration lives in `run_udyam.py`.
+Runtime configuration is centralized in `config.py` and can be supplied through environment variables or `.env`. This keeps deployment-specific values out of source code.
 
-| Variable | Current Value | Purpose |
-|---|---|---|
-| `TEST_STATE` | `"ANDAMAN AND NICOBAR ISLANDS"` | Development/test state; set to `None` for all states |
-| `MAX_WORKERS` | `3` | Parallel state worker threads |
+| Variable | Default | Purpose |
+|---|---:|---|
+| `UDYAM_TEST_STATE` | `ANDAMAN AND NICOBAR ISLANDS` | Test state; set to `ALL` or empty for all states |
+| `UDYAM_MAX_WORKERS` | `3` | Parallel state workers |
+| `UDYAM_BATCH_SIZE` | `10000` | Records per API request |
+| `UDYAM_MAX_RETRIES` | `5` | Retry attempts per batch |
+| `UDYAM_CONNECT_TIMEOUT` | `30` | curl connect timeout (seconds) |
+| `UDYAM_MAX_REQUEST_TIME` | `300` | curl max request duration (seconds) |
+| `UDYAM_RETRY_BACKOFF_BASE` | `5` | Initial retry backoff (seconds) |
+| `UDYAM_RETRY_BACKOFF_MAX` | `60` | Maximum exponential backoff (seconds) |
+| `UDYAM_RETRY_JITTER` | `3` | Random retry jitter (seconds) |
+| `UDYAM_RATE_LIMIT_DELAY` | `30` | Minimum delay after HTTP 429 (seconds) |
+| `UDYAM_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 
-> **Current repository configuration:** `TEST_STATE` is intentionally set to `"ANDAMAN AND NICOBAR ISLANDS"` for controlled testing. Do not change it to `None` until single-state validation is complete.
+`UDYAM_API_KEY` remains a required secret and must not be committed.
 
-Core constants in `udyam_extractor.py` (not normally changed):
+Use `.env.example` as the deployment template. The checked-in repository remains configured for a controlled single-state run.
 
-| Constant | Value | Purpose |
-|---|---|---|
-| `BATCH_SIZE` | `10000` | Records per API request |
-| `MAX_RETRIES` | `5` | Retry attempts per batch |
-| `CONNECT_TIMEOUT` | `30` | curl connect timeout (seconds) |
-| `MAX_REQUEST_TIME` | `300` | curl max request duration (seconds) |
 
 ---
 
@@ -255,6 +285,8 @@ API response
     ↓
 Atomic batch CSV   (temp write → fsync → replace)
     ↓
+SHA-256 checksum
+    ↓
 Manifest entry     (SUCCESS appended to manifest.jsonl)
     ↓
 Atomic checkpoint  (state progress updated)
@@ -319,6 +351,32 @@ One checkpoint file per state per run at `checkpoints/<run_id>/<state>.json`:
 
 Status values: `NOT_STARTED` | `IN_PROGRESS` | `COMPLETED` | `FAILED`
 
+### Failure Metadata
+
+Failed states retain machine-readable failure information in their checkpoints:
+
+```json
+{
+    "status": "FAILED",
+    "failure_reason": "RETRY_EXHAUSTED",
+    "failure_stage": "API_FETCH",
+    "failure_detail": "Failed to fetch state=...",
+    "retry_count": 5,
+    "http_status": 503,
+    "failed_at": "2026-09-14T..."
+}
+```
+
+The same failure information is surfaced in `run_summary.json`, making failures consumable by future orchestration and monitoring systems without parsing log text.
+
+### Graceful Shutdown
+
+`Ctrl+C` (`SIGINT`) or `SIGTERM` requests a cooperative shutdown. The current API request is allowed to finish, then workers stop before starting another batch. Checkpoints remain resumable and the process exits with code `1`.
+
+### API Retry Policy
+
+The extractor retries transient curl failures, HTTP `429`, HTTP `500`, `502`, `503`, and `504`, using bounded exponential backoff and jitter. Non-retryable HTTP 4xx responses fail the state immediately. Rate-limited responses use at least `UDYAM_RATE_LIMIT_DELAY`.
+
 ### Resume Behavior
 
 If a run is interrupted, re-run with the same `UDYAM_RUN_ID`:
@@ -373,7 +431,7 @@ Example:
 
 ### Manifest
 
-`output/<run_id>/manifest.jsonl` — one line per successfully persisted batch:
+`output/<run_id>/manifest.jsonl` — one line per successfully persisted batch. The `checksum` field holds the SHA-256 hex digest of the batch CSV, computed immediately after the atomic write and verified against the file on resume:
 
 ```json
 {
@@ -383,6 +441,7 @@ Example:
     "offset": 0,
     "record_count": 10000,
     "batch_file": "output\\...\\ANDAMAN AND NICOBAR ISLANDS\\batches\\...csv",
+    "checksum": "a3f1c2d4e5b6...",
     "status": "SUCCESS",
     "persisted_at": "2026-09-12T16:50:54.146875+00:00"
 }
@@ -415,7 +474,7 @@ Example:
 
 A new log file is created per execution at `logs/udyam_<YYYYMMDD_HHMMSS>.log`.
 
-Log entries cover: run ID, state, API request details, offset, retry attempts, records retrieved/written, batch/state/overall elapsed times, and final summary.
+Log entries cover: run ID, state, API request details, HTTP status, offset, retry attempts, failure reasons, records retrieved/written, batch/state/overall elapsed times, and final summary.
 
 Timing is emitted at three levels:
 
@@ -487,6 +546,29 @@ The extractor fails closed if a CSV file exists on disk without a corresponding 
 
 ---
 
+## Automated Testing and CI
+
+Run the local regression suite:
+
+```powershell
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+The repository includes a Windows GitHub Actions workflow at `.github/workflows/ci.yml`. Pull requests and pushes run Python compilation and the automated test suite.
+
+## Production Host Preflight
+
+Before deploying to the Windows Server, run:
+
+```powershell
+.\scripts\preflight.ps1
+```
+
+The preflight verifies Python 3.10+, `curl.exe`, required runtime directories, Python compilation, and the presence of `UDYAM_API_KEY` when `.env` exists.
+
+CI validates the application code; production deployment/CD remains a separate next phase.
+
 ## Security
 
 - Store the API key only in `.env`
@@ -500,6 +582,7 @@ The extractor fails closed if a CSV file exists on disk without a corresponding 
 ```gitignore
 .env
 __pycache__/
+.pytest_cache/
 *.py[cod]
 output/
 checkpoints/
@@ -515,6 +598,25 @@ Thumbs.db
 ---
 
 ## Version History
+
+### 2.0.0 — Production hardening
+
+- Structured failure metadata for API, persistence, reconciliation, artifact, shutdown, and unexpected state failures
+- Centralized environment-driven configuration with validation
+- Graceful SIGINT/SIGTERM shutdown with resumable state checkpoints
+- HTTP status classification for retryable 429/5xx and non-retryable 4xx responses
+- Configurable bounded exponential backoff, jitter, and rate-limit delay
+- Automated pytest regression suite
+- Windows GitHub Actions CI
+- `requirements.txt`, `requirements-dev.txt`, `.env.example`, and Windows preflight support
+
+### 1.7.0 — SHA-256 batch artifact integrity
+
+- SHA-256 checksum (`hashlib`) computed on every batch CSV immediately after atomic write
+- Checksum stored in each `manifest.jsonl` entry as a new `checksum` field
+- `is_batch_artifact_valid` now performs cryptographic verification in addition to existence and size checks
+- Resume recovery enumerates six named failure reasons: `MissingBatchFile`, `BatchFileNotFound`, `BatchPathNotFile`, `BatchFileEmpty`, `MissingChecksum`, `ChecksumMismatch`
+- `calculate_file_sha256(path)` reads in 1 MB chunks for memory-efficient hashing of large batch files
 
 ### 1.6.0 — Durable run summary
 
@@ -553,7 +655,7 @@ Thumbs.db
 
 - The source API does not provide a stable record-level unique identifier for enterprises.
 - Current persistence format is CSV; Parquet / object-storage landing is planned.
-- Batch artifact validation verifies file existence and non-zero size only; record-level integrity checks are not performed at extraction time.
+- Batch artifact validation verifies file existence, non-zero size, and SHA-256 checksum against the manifest; record-level semantic integrity checks are not performed at extraction time.
 - Record-level duplicate detection is not performed by the extractor — deduplication belongs in a downstream Silver-layer transform.
 - API totals are used for extraction reconciliation but do not establish enterprise uniqueness.
 - Run metadata is represented through logs, checkpoints, the batch manifest, and `run_summary.json`; a dedicated upstream ingestion trigger based on this file is planned.
