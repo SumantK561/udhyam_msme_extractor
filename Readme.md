@@ -1,6 +1,6 @@
 # Udyam MSME Extractor
 
-**Version 1.5.0**
+**Version 1.6.0**
 
 Production-grade Python pipeline for extracting MSME registered-unit data from the Government of India's Udyam dataset via the `data.gov.in` API. Designed for Supplier.io's supplier intelligence ingestion workflow.
 
@@ -32,12 +32,11 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Offset/limit pagination with short-page protection
 - State-level reconciliation (API total vs. persisted records)
 - Run-level reconciliation (all states completed + SUM check)
+- Durable run summary artifact (`run_summary.json`) written atomically at end of every run
 - Structured per-execution log file
 - Process exit codes (`0` success / `1` failure)
 
 ### Planned
-
-- Durable run summary artifact
 - Object-storage landing layer (raw CSV → cloud bucket)
 - Snowflake ingestion (RAW layer)
 - dbt Bronze / Silver / Gold transformations
@@ -96,6 +95,7 @@ Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Serv
 - Checkpoint-based resume at the batch level
 - Fail-closed on orphaned artifacts (CSV present but no manifest entry → hard stop)
 - State-level and run-level reconciliation (API totals vs. persisted records)
+- Durable run summary artifact (`run_summary.json`) written atomically at end of every run
 - Per-execution log file
 - API key stored in `.env`, never in source
 
@@ -114,6 +114,7 @@ Udyam_MSME/
 ├── output/                   # Runtime — not committed
 │   └── <run_id>/
 │       ├── manifest.jsonl
+│       ├── run_summary.json
 │       └── <state>/
 │           └── batches/
 │               ├── <run_id>_<state>_0.csv
@@ -387,6 +388,27 @@ Example:
 }
 ```
 
+### Run Summary
+
+`output/<run_id>/run_summary.json` — written atomically at the end of every run (success or failure):
+
+```json
+{
+    "run_id": "20260912T165020Z_0ab2cda0",
+    "started_at": "2026-09-12T16:50:20+00:00",
+    "completed_at": "2026-09-12T16:51:25+00:00",
+    "requested_states": 32,
+    "completed_states": 32,
+    "failed_states": 0,
+    "expected_records": 43417872,
+    "actual_records": 43417872,
+    "reconciliation_status": "PASSED",
+    "run_status": "COMPLETED"
+}
+```
+
+`reconciliation_status` is `"PASSED"` or `"FAILED"`. `run_status` is `"COMPLETED"` or `"FAILED"`. The file uses the same atomic temp-write → `fsync` → replace pattern as batch CSVs and checkpoints.
+
 ---
 
 ## Logging
@@ -494,6 +516,13 @@ Thumbs.db
 
 ## Version History
 
+### 1.6.0 — Durable run summary
+
+- Durable `run_summary.json` artifact written atomically at end of every run (success and failure paths)
+- Run summary schema: `run_id`, `started_at`, `completed_at`, `requested_states`, `completed_states`, `failed_states`, `expected_records`, `actual_records`, `reconciliation_status`, `run_status`
+- `started_at` / `completed_at` captured as UTC wall-clock timestamps (separate from `perf_counter` timing)
+- `build_run_summary()` in `run_udyam.py`; `write_run_summary()` + `get_run_summary_path()` in `udyam_extractor.py`
+
 ### 1.5.0 — Production reliability and reconciliation
 
 - Timestamp-based run identity with UUID-derived suffix (`YYYYMMDDTHHMMSSZ_<8hexchars>`)
@@ -527,7 +556,7 @@ Thumbs.db
 - Batch artifact validation verifies file existence and non-zero size only; record-level integrity checks are not performed at extraction time.
 - Record-level duplicate detection is not performed by the extractor — deduplication belongs in a downstream Silver-layer transform.
 - API totals are used for extraction reconciliation but do not establish enterprise uniqueness.
-- Run metadata is represented through logs, checkpoints, and the batch manifest; a dedicated run summary artifact is planned.
+- Run metadata is represented through logs, checkpoints, the batch manifest, and `run_summary.json`; a dedicated upstream ingestion trigger based on this file is planned.
 - The extractor runs directly on Windows and is not yet deployed through CI/CD.
 - `MAX_WORKERS` concurrency is bounded by Udyam API stability, not local resources — increasing it without validating API behavior can cause widespread timeouts.
 
