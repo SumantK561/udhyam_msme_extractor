@@ -4,9 +4,48 @@ on:
   workflow_dispatch:
     inputs:
       state:
-        description: "State to extract (leave blank for all states)"
-        required: false
-        default: "ANDAMAN AND NICOBAR ISLANDS"
+        description: "State to extract"
+        required: true
+        type: choice
+        default: "ALL"
+        options:
+          - ALL
+          - ANDAMAN AND NICOBAR ISLANDS
+          - ANDHRA PRADESH
+          - ARUNACHAL PRADESH
+          - ASSAM
+          - BIHAR
+          - CHANDIGARH
+          - CHHATTISGARH
+          - DADRA AND NAGAR HAVELI AND DAMAN AND DIU
+          - DELHI
+          - GOA
+          - GUJARAT
+          - HARYANA
+          - HIMACHAL PRADESH
+          - JAMMU AND KASHMIR
+          - JHARKHAND
+          - KARNATAKA
+          - KERALA
+          - LADAKH
+          - LAKSHADWEEP
+          - MADHYA PRADESH
+          - MAHARASHTRA
+          - MANIPUR
+          - MEGHALAYA
+          - MIZORAM
+          - NAGALAND
+          - ODISHA
+          - PUDUCHERRY
+          - PUNJAB
+          - RAJASTHAN
+          - SIKKIM
+          - TAMIL NADU
+          - TELANGANA
+          - TRIPURA
+          - UTTAR PRADESH
+          - UTTARAKHAND
+          - WEST BENGAL
       run_id:
         description: "Resume a specific run ID (leave blank to start a new run)"
         required: false
@@ -32,7 +71,12 @@ jobs:
             export UDYAM_API_KEY="${{ secrets.UDYAM_API_KEY }}"
             export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
             export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-            export UDYAM_TEST_STATE="${{ github.event.inputs.state }}"
+            # "ALL" means run every state — pass empty string to the extractor
+            if [ "${{ github.event.inputs.state }}" = "ALL" ]; then
+              export UDYAM_TEST_STATE=""
+            else
+              export UDYAM_TEST_STATE="${{ github.event.inputs.state }}"
+            fi
             export UDYAM_RUN_ID="${{ github.event.inputs.run_id }}"
 
             python3 run_udyam.py
