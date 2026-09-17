@@ -1,6 +1,6 @@
 # Udyam MSME Extractor
 
-**Version 3.1.0**
+**Version 3.2.0**
 
 Production-grade Python pipeline for extracting MSME registered-unit data from the Government of India's Udyam dataset via the `data.gov.in` API. Designed for Supplier.io's supplier intelligence ingestion workflow.
 
@@ -50,10 +50,10 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Idempotent **Snowflake RAW loader** with per-batch ledger, row-count reconciliation, and fail-closed LOADING guard
 - Snowflake connected to S3 via Storage Integration (no long-lived AWS keys in Snowflake)
 - Least-privilege IAM policy for the extractor service account (`s3:PutObject`, `s3:GetObject` scoped to prefix)
+- **dbt Bronze / Silver / Gold transformation layer** with 7 models, 45 data tests, and MD5 surrogate keys
 
 ### Planned
 
-- dbt Bronze / Silver / Gold transformations
 - Airflow orchestration and scheduling
 - Monitoring and alerting
 - Data-quality framework
@@ -145,6 +145,24 @@ Udyam_MSME/
 │   └── part 3.sql            # External stage + verification
 ├── tests/
 │   └── test_production_hardening.py
+│
+├── udyam_dbt/                # dbt transformation project
+│   ├── dbt_project.yml
+│   └── models/
+│       ├── bronze/
+│       │   ├── sources.yml           # Points to UDYAM.RAW.MSME
+│       │   ├── bronze_msme.sql       # Type-cast RAW records (incremental)
+│       │   └── schema.yml
+│       ├── silver/
+│       │   ├── silver_msme.sql       # Deduplicated enterprises (incremental)
+│       │   ├── silver_msme_activities.sql  # Flattened NIC codes (incremental)
+│       │   └── schema.yml
+│       └── gold/
+│           ├── dim_geography.sql     # State / district / pincode dimension
+│           ├── dim_nic_code.sql      # NIC code dimension
+│           ├── dim_enterprise.sql    # Enterprise dimension
+│           ├── fct_registrations.sql # Registration fact table
+│           └── schema.yml
 │
 ├── output/                   # Runtime — not committed
 │   └── <run_id>/
@@ -531,6 +549,57 @@ State C  → FAILED         → Restart; recovered batches are validated, remain
 
 ---
 
+## dbt Transformation Layer
+
+The `udyam_dbt/` project transforms raw MSME data through three Snowflake schemas.
+
+### Bronze — `UDYAM.DBT_BRONZE`
+
+| Model | Grain | Strategy |
+|---|---|---|
+| `bronze_msme` | One row per raw batch record | Incremental merge on `(batch_id, source_offset)` |
+
+Casts raw VARCHAR columns to typed values (`state_code` → INTEGER, `pincode` → zero-padded VARCHAR, `registration_date` → DATE, `activities` → VARIANT). Null `enterprise_name` rows are preserved and surfaced as a warning test.
+
+### Silver — `UDYAM.DBT_SILVER`
+
+| Model | Grain | Strategy |
+|---|---|---|
+| `silver_msme` | One row per unique enterprise | Incremental merge on `enterprise_key` (MD5) |
+| `silver_msme_activities` | One row per enterprise × NIC code | Incremental merge on `activity_key` (MD5) |
+
+`silver_msme` deduplicates by `(enterprise_name, state_code, district_code, registration_date)`, keeps the latest record, adds `country = 'IND'` and `msme = 1` flags, and excludes null `enterprise_name` rows.
+
+`silver_msme_activities` lateral-flattens the `activities` VARIANT into one row per NIC 5-digit code with its description.
+
+### Gold — `UDYAM.DBT_GOLD`
+
+| Model | Grain | Strategy |
+|---|---|---|
+| `dim_geography` | One row per state / district / pincode | Full table rebuild |
+| `dim_nic_code` | One row per NIC code | Full table rebuild |
+| `dim_enterprise` | One row per enterprise | Full table rebuild |
+| `fct_registrations` | One row per enterprise registration | Full table rebuild |
+
+All surrogate keys are MD5 hashes. `fct_registrations` links `enterprise_key` → `dim_enterprise` and `geo_key` → `dim_geography`. Foreign-key relationship tests are enforced in `schema.yml`.
+
+### Running dbt
+
+```bash
+cd udyam_dbt
+
+# Run all models in dependency order
+dbt run
+
+# Run tests
+dbt test
+
+# Full refresh (re-create all incremental models from scratch)
+dbt run --full-refresh
+```
+
+---
+
 ## CI / CD
 
 ### Continuous Integration (`ci.yml`)
@@ -587,6 +656,14 @@ Verifies Python 3.10+, `curl`, required runtime directories, Python compilation,
 ---
 
 ## Version History
+
+### 3.2.0 — dbt Bronze / Silver / Gold transformation layer
+
+- **Bronze** (`bronze_msme`) — incremental model on `UDYAM.RAW.MSME`; casts all columns to typed values, zero-pads pincodes, parses activities JSON; unique key `(batch_id, source_offset)`
+- **Silver** (`silver_msme`) — deduplicates by enterprise business key, adds `country='IND'` and `msme=1` flags, excludes null enterprise names
+- **Silver** (`silver_msme_activities`) — lateral-flattens activities VARIANT into one row per NIC 5-digit code per enterprise
+- **Gold** (`dim_geography`, `dim_nic_code`, `dim_enterprise`, `fct_registrations`) — star schema with MD5 surrogate keys and FK relationship tests
+- 45 data tests across all layers; `not_null_bronze_msme_enterprise_name` set to `warn` severity (2 dirty source records identified)
 
 ### 3.1.0 — EC2 deployment and CI/CD pipeline
 
