@@ -1,0 +1,51 @@
+version: 2
+
+models:
+  - name: bronze_msme
+    description: "Type-cast RAW MSME records. One row per source record, all lineage columns preserved. No deduplication."
+    columns:
+      - name: state_code
+        description: "Integer state code"
+        data_tests:
+          - not_null
+      - name: state_name
+        description: "State name"
+        data_tests:
+          - not_null
+      - name: district_code
+        description: "Integer district code"
+      - name: district_name
+        description: "District name"
+      - name: pincode
+        description: "6-digit PIN code string (zero-padded)"
+      - name: registration_date
+        description: "Udyam registration date parsed to DATE"
+      - name: enterprise_name
+        description: "Trimmed enterprise name"
+        data_tests:
+          - not_null:
+              severity: warn
+      - name: communication_address
+        description: "Trimmed communication address"
+      - name: activities
+        description: "Parsed VARIANT containing array of NIC activity objects"
+      - name: run_id
+        description: "Extractor run ID"
+        data_tests:
+          - not_null
+      - name: batch_id
+        description: "Batch ID"
+        data_tests:
+          - not_null
+      - name: source_file
+        description: "S3 source object path"
+      - name: source_offset
+        description: "Batch offset"
+      - name: ingested_at
+        description: "Snowflake ingestion timestamp"
+        data_tests:
+          - not_null
+      - name: bronze_loaded_at
+        description: "Timestamp this row was written to the Bronze layer"
+        data_tests:
+          - not_null

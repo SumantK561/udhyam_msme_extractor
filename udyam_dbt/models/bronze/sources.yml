@@ -1,0 +1,39 @@
+version: 2
+
+sources:
+  - name: raw
+    database: UDYAM
+    schema: RAW
+    tables:
+      - name: msme
+        identifier: MSME
+        description: "RAW MSME batch artifacts loaded from S3 by the Udyam extractor."
+        columns:
+          - name: LG_ST_CODE
+            description: "State code from the Udyam API"
+          - name: STATE
+            description: "State name"
+          - name: LG_DT_CODE
+            description: "District code"
+          - name: DISTRICT
+            description: "District name"
+          - name: PINCODE
+            description: "PIN code (arrives as float, e.g. 744105.0)"
+          - name: REGISTRATION_DATE
+            description: "Udyam registration date string in DD/MM/YYYY format"
+          - name: ENTERPRISE_NAME
+            description: "Registered enterprise name"
+          - name: COMMUNICATION_ADDRESS
+            description: "Full communication address string"
+          - name: ACTIVITIES
+            description: "JSON array of NIC activity codes and descriptions"
+          - name: _RUN_ID
+            description: "Extractor run ID"
+          - name: _BATCH_ID
+            description: "Batch ID within the run"
+          - name: _SOURCE_FILE
+            description: "S3 object path of the source batch file"
+          - name: _SOURCE_OFFSET
+            description: "Batch offset within the state extraction"
+          - name: _INGESTED_AT
+            description: "Timestamp when the batch was loaded into Snowflake"
