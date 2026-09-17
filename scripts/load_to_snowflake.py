@@ -1,20 +1,20 @@
 """
-Idempotent GCS -> Snowflake RAW loader for Udyam MSME.
+Idempotent S3 -> Snowflake RAW loader for Udyam MSME.
 
 Flow:
-    GCS manifest
+    S3 manifest
         -> SUCCESS batches
         -> INGESTION_BATCH idempotency check
         -> COPY INTO RAW
         -> row-count reconciliation
         -> INGESTION_BATCH update
 
-Development authentication:
-    Snowflake External Browser / SSO
-
-Production authentication:
-    Use a non-interactive Snowflake authentication mechanism.
-    Never hard-code credentials or secrets in this application.
+Authentication:
+    Snowflake: set SNOWFLAKE_AUTHENTICATOR=snowflake + SNOWFLAKE_PASSWORD,
+               or SNOWFLAKE_AUTHENTICATOR=externalbrowser for SSO.
+    AWS:       credentials resolve via the standard chain (env, shared
+               config, or IAM role). The stage uses a Storage Integration
+               so no AWS keys are stored in Snowflake.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ class Settings:
     account: str
     user: str
     authenticator: str
+    password: str | None
     role: str
     warehouse: str
     database: str
@@ -86,6 +87,7 @@ class Settings:
             account=required["SNOWFLAKE_ACCOUNT"],
             user=required["SNOWFLAKE_USER"],
             authenticator=required["SNOWFLAKE_AUTHENTICATOR"],
+            password=os.getenv("SNOWFLAKE_PASSWORD") or None,
             role=required["SNOWFLAKE_ROLE"],
             warehouse=required["SNOWFLAKE_WAREHOUSE"],
             database=required["SNOWFLAKE_DATABASE"],
@@ -156,7 +158,7 @@ def create_connection(settings: Settings):
         settings.schema,
     )
 
-    return snowflake.connector.connect(
+    kwargs = dict(
         account=settings.account,
         user=settings.user,
         authenticator=settings.authenticator,
@@ -166,6 +168,16 @@ def create_connection(settings: Settings):
         schema=settings.schema,
     )
 
+    if settings.authenticator == "snowflake":
+        if not settings.password:
+            raise LoaderError(
+                "SNOWFLAKE_PASSWORD is required when "
+                "SNOWFLAKE_AUTHENTICATOR=snowflake"
+            )
+        kwargs["password"] = settings.password
+
+    return snowflake.connector.connect(**kwargs)
+
 
 def load_manifest(
     cursor,
@@ -174,9 +186,7 @@ def load_manifest(
     """
     Read the manifest.jsonl for exactly one configured Udyam run.
 
-    The external stage is already configured to point to:
-
-        gs://prod_us_dataengineering/udyam/raw/
+    The external stage is configured to point to the udyam/raw/ prefix.
     """
 
     if not settings.run_id:
@@ -329,17 +339,16 @@ def copy_batch(
 
     batch_file = str(manifest_record["batch_file"])
 
-    # The manifest must contain a GCS URI.
-    if not batch_file.startswith("gs://"):
+    _SUPPORTED_SCHEMES = ("s3://", "gs://")
+
+    if not any(batch_file.startswith(s) for s in _SUPPORTED_SCHEMES):
         raise LoaderError(
-            f"Unsupported batch_file URI: {batch_file}"
+            f"Unsupported batch_file URI scheme: {batch_file}"
         )
 
-    # The configured external stage points to:
-    #
-    # gs://prod_us_dataengineering/udyam/raw/
-    #
-    # Convert the full GCS URI into a stage-relative object path.
+    # Convert the full object URI into a stage-relative path.
+    # The external stage points to the udyam/raw/ prefix, so we
+    # strip everything up to and including that marker.
     marker = "/udyam/raw/"
 
     if marker not in batch_file:
@@ -798,7 +807,7 @@ def main() -> int:
         settings = Settings.from_environment()
 
         LOGGER.info(
-            "Starting GCS -> Snowflake loader run_id=%s",
+            "Starting S3 -> Snowflake loader run_id=%s",
             settings.run_id,
         )
 

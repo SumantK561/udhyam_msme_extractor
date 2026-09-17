@@ -56,8 +56,210 @@ class LocalStorage:
         return None
 
 
-class GCSStorage:
+class ObjectStorage:
+    """Object-store layout and verification shared by cloud backends.
+
+    Subclasses provide the provider-specific calls (``_upload``, ``_head``)
+    and set ``scheme``/``label``; everything else is identical across
+    providers.
+    """
+
+    scheme = ""
+    label = ""
+
+    def __init__(self, bucket_name: str, prefix: str):
+        self.bucket_name = bucket_name
+        self.prefix = prefix.strip("/")
+
+    def _upload(
+        self,
+        local_path: Path,
+        object_name: str,
+        *,
+        checksum: Optional[str] = None,
+        content_type: Optional[str] = None,
+        if_absent: bool = False,
+    ) -> None:
+        raise NotImplementedError
+
+    def _head(
+        self,
+        object_name: str,
+    ) -> Optional[tuple[Optional[int], Optional[str]]]:
+        """Return (size, sha256 metadata), or None when the object is absent."""
+
+        raise NotImplementedError
+
+    def _object_name(
+        self,
+        run_id: str,
+        state: str,
+        filename: str,
+        *,
+        batch: bool = False,
+    ) -> str:
+        run_root = (
+            f"{self.prefix}/run_id={run_id}"
+            if self.prefix
+            else f"run_id={run_id}"
+        )
+
+        if batch:
+            return f"{run_root}/state={state}/batches/{filename}"
+
+        return f"{run_root}/{filename}"
+
+    def _uri(self, object_name: str) -> str:
+        return f"{self.scheme}://{self.bucket_name}/{object_name}"
+
+    def publish_batch(
+        self,
+        local_path: Path,
+        run_id: str,
+        state: str,
+        offset: int,
+        checksum: str,
+    ) -> str:
+        object_name = self._object_name(
+            run_id,
+            state,
+            local_path.name,
+            batch=True,
+        )
+        uri = self._uri(object_name)
+
+        self._upload(
+            local_path,
+            object_name,
+            checksum=checksum,
+            if_absent=True,
+        )
+
+        # ------------------------------------------------------------------
+        # Verify that the uploaded object exists and that its metadata
+        # contains the expected checksum.
+        # ------------------------------------------------------------------
+        head = self._head(object_name)
+
+        if head is None:
+            raise StorageError(
+                f"{self.label} upload verification failed: "
+                f"missing object {uri}"
+            )
+
+        size, remote_checksum = head
+
+        if not size:
+            raise StorageError(
+                f"{self.label} upload verification failed: empty object {uri}"
+            )
+
+        if remote_checksum != checksum:
+            raise StorageError(
+                f"{self.label} checksum metadata mismatch for {uri}: "
+                f"expected={checksum}, actual={remote_checksum}"
+            )
+
+        return uri
+
+    def validate_artifact(
+        self,
+        manifest_record: dict,
+        checksum_fn,
+    ) -> tuple[bool, str]:
+        batch_file = manifest_record.get("batch_file")
+        expected_checksum = manifest_record.get("checksum")
+
+        if not batch_file:
+            return False, "MissingBatchFile"
+
+        if not expected_checksum:
+            return False, "MissingChecksum"
+
+        parsed = urlparse(batch_file)
+
+        if parsed.scheme != self.scheme:
+            return False, f"Invalid{self.label}Uri"
+
+        if parsed.netloc != self.bucket_name:
+            return False, f"Unexpected{self.label}Bucket"
+
+        object_name = parsed.path.lstrip("/")
+
+        if not object_name:
+            return False, f"Missing{self.label}Object"
+
+        head = self._head(object_name)
+
+        if head is None:
+            return False, f"{self.label}ObjectNotFound"
+
+        size, remote_checksum = head
+
+        if not size:
+            return False, f"{self.label}ObjectEmpty"
+
+        if remote_checksum != expected_checksum:
+            return False, "ChecksumMismatch"
+
+        return True, ""
+
+    def _upload_metadata_file(
+        self,
+        local_path: Path,
+        object_name: str,
+        content_type: str,
+    ) -> None:
+        self._upload(
+            local_path,
+            object_name,
+            content_type=content_type,
+        )
+
+        head = self._head(object_name)
+
+        if head is None or not head[0]:
+            raise StorageError(
+                f"{self.label} metadata upload verification failed: "
+                f"empty object {self._uri(object_name)}"
+            )
+
+    def sync_manifest(
+        self,
+        run_id: str,
+        local_path: Path,
+    ) -> None:
+        self._upload_metadata_file(
+            local_path,
+            self._object_name(
+                run_id,
+                "",
+                local_path.name,
+            ),
+            "application/x-ndjson",
+        )
+
+    def sync_run_summary(
+        self,
+        run_id: str,
+        local_path: Path,
+    ) -> None:
+        self._upload_metadata_file(
+            local_path,
+            self._object_name(
+                run_id,
+                "",
+                local_path.name,
+            ),
+            "application/json",
+        )
+
+
+class GCSStorage(ObjectStorage):
     """Publish RAW artifacts directly to Google Cloud Storage."""
+
+    scheme = "gs"
+    label = "GCS"
 
     def __init__(
         self,
@@ -65,6 +267,8 @@ class GCSStorage:
         prefix: str = "udyam/raw",
         project: Optional[str] = None,
     ):
+        super().__init__(bucket_name, prefix)
+
         try:
             from google.cloud import storage
         except ImportError as exc:
@@ -72,9 +276,6 @@ class GCSStorage:
                 "google-cloud-storage is required for "
                 "UDYAM_STORAGE_BACKEND=gcs"
             ) from exc
-
-        self.bucket_name = bucket_name
-        self.prefix = prefix.strip("/")
 
         # ------------------------------------------------------------------
         # POC-ONLY authentication override.
@@ -115,48 +316,30 @@ class GCSStorage:
 
         self.bucket = self.client.bucket(bucket_name)
 
-    def _object_name(
-        self,
-        run_id: str,
-        state: str,
-        filename: str,
-        *,
-        batch: bool = False,
-    ) -> str:
-        run_root = (
-            f"{self.prefix}/run_id={run_id}"
-            if self.prefix
-            else f"run_id={run_id}"
-        )
 
-        if batch:
-            return f"{run_root}/state={state}/batches/{filename}"
-
-        return f"{run_root}/{filename}"
-
-    def _uri(self, object_name: str) -> str:
-        return f"gs://{self.bucket_name}/{object_name}"
-
-    def publish_batch(
+    def _upload(
         self,
         local_path: Path,
-        run_id: str,
-        state: str,
-        offset: int,
-        checksum: str,
-    ) -> str:
-        object_name = self._object_name(
-            run_id,
-            state,
-            local_path.name,
-            batch=True,
-        )
-
+        object_name: str,
+        *,
+        checksum: Optional[str] = None,
+        content_type: Optional[str] = None,
+        if_absent: bool = False,
+    ) -> None:
         blob = self.bucket.blob(object_name)
 
-        blob.metadata = {
-            "sha256": checksum,
-        }
+        if checksum:
+            blob.metadata = {
+                "sha256": checksum,
+            }
+
+        options = {}
+
+        if content_type:
+            options["content_type"] = content_type
+
+        if if_absent:
+            options["if_generation_match"] = 0
 
         try:
             with local_path.open("rb") as file:
@@ -164,142 +347,114 @@ class GCSStorage:
                     file,
                     rewind=False,
                     checksum="auto",
-                    if_generation_match=0,
+                    **options,
                 )
-
-            blob.reload()
 
         except Exception as exc:
             raise StorageError(
                 f"GCS upload failed for {self._uri(object_name)}: {exc}"
             ) from exc
 
-        # ------------------------------------------------------------------
-        # Verify that the uploaded object exists and that its metadata
-        # contains the expected checksum.
-        # ------------------------------------------------------------------
-        if blob.size is None or blob.size <= 0:
-            raise StorageError(
-                f"GCS upload verification failed: empty object "
-                f"{self._uri(object_name)}"
-            )
-
-        remote_checksum = (blob.metadata or {}).get("sha256")
-
-        if remote_checksum != checksum:
-            raise StorageError(
-                f"GCS checksum metadata mismatch for "
-                f"{self._uri(object_name)}: "
-                f"expected={checksum}, actual={remote_checksum}"
-            )
-
-        return self._uri(object_name)
-
-    def validate_artifact(
+    def _head(
         self,
-        manifest_record: dict,
-        checksum_fn,
-    ) -> tuple[bool, str]:
-        batch_file = manifest_record.get("batch_file")
-        expected_checksum = manifest_record.get("checksum")
-
-        if not batch_file:
-            return False, "MissingBatchFile"
-
-        if not expected_checksum:
-            return False, "MissingChecksum"
-
-        parsed = urlparse(batch_file)
-
-        if parsed.scheme != "gs":
-            return False, "InvalidGCSUri"
-
-        if parsed.netloc != self.bucket_name:
-            return False, "UnexpectedGCSBucket"
-
-        object_name = parsed.path.lstrip("/")
-
-        if not object_name:
-            return False, "MissingGCSObject"
-
+        object_name: str,
+    ) -> Optional[tuple[Optional[int], Optional[str]]]:
         blob = self.bucket.blob(object_name)
 
         try:
             blob.reload()
 
         except Exception:
-            return False, "GCSObjectNotFound"
+            return None
 
-        if blob.size is None or blob.size <= 0:
-            return False, "GCSObjectEmpty"
+        return blob.size, (blob.metadata or {}).get("sha256")
 
-        remote_checksum = (blob.metadata or {}).get("sha256")
 
-        if remote_checksum != expected_checksum:
-            return False, "ChecksumMismatch"
+class S3Storage(ObjectStorage):
+    """Publish RAW artifacts directly to Amazon S3."""
 
-        return True, ""
+    scheme = "s3"
+    label = "S3"
 
-    def _upload_metadata_file(
+    def __init__(
+        self,
+        bucket_name: str,
+        prefix: str = "udyam/raw",
+        region: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
+    ):
+        super().__init__(bucket_name, prefix)
+
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+        except ImportError as exc:
+            raise StorageError(
+                "boto3 is required for UDYAM_STORAGE_BACKEND=s3"
+            ) from exc
+
+        self._client_error = ClientError
+
+        # Credentials come from the default AWS chain: environment,
+        # shared config, or instance/task role.
+        self.client = boto3.client(
+            "s3",
+            region_name=region,
+            endpoint_url=endpoint_url,
+        )
+
+    def _upload(
         self,
         local_path: Path,
         object_name: str,
-        content_type: str,
+        *,
+        checksum: Optional[str] = None,
+        content_type: Optional[str] = None,
+        if_absent: bool = False,
     ) -> None:
-        blob = self.bucket.blob(object_name)
+        options = {}
+
+        if checksum:
+            options["Metadata"] = {
+                "sha256": checksum,
+            }
+
+        if content_type:
+            options["ContentType"] = content_type
+
+        if if_absent:
+            options["IfNoneMatch"] = "*"
 
         try:
             with local_path.open("rb") as file:
-                blob.upload_from_file(
-                    file,
-                    rewind=False,
-                    content_type=content_type,
-                    checksum="auto",
+                self.client.put_object(
+                    Bucket=self.bucket_name,
+                    Key=object_name,
+                    Body=file,
+                    **options,
                 )
-
-            blob.reload()
 
         except Exception as exc:
             raise StorageError(
-                f"GCS metadata upload failed for "
-                f"{self._uri(object_name)}: {exc}"
+                f"S3 upload failed for {self._uri(object_name)}: {exc}"
             ) from exc
 
-        if blob.size is None or blob.size <= 0:
-            raise StorageError(
-                f"GCS metadata upload verification failed: "
-                f"empty object {self._uri(object_name)}"
+    def _head(
+        self,
+        object_name: str,
+    ) -> Optional[tuple[Optional[int], Optional[str]]]:
+        try:
+            response = self.client.head_object(
+                Bucket=self.bucket_name,
+                Key=object_name,
             )
 
-    def sync_manifest(
-        self,
-        run_id: str,
-        local_path: Path,
-    ) -> None:
-        self._upload_metadata_file(
-            local_path,
-            self._object_name(
-                run_id,
-                "",
-                local_path.name,
-            ),
-            "application/x-ndjson",
-        )
+        except self._client_error:
+            return None
 
-    def sync_run_summary(
-        self,
-        run_id: str,
-        local_path: Path,
-    ) -> None:
-        self._upload_metadata_file(
-            local_path,
-            self._object_name(
-                run_id,
-                "",
-                local_path.name,
-            ),
-            "application/json",
-        )
+        metadata = response.get("Metadata") or {}
+
+        return response.get("ContentLength"), metadata.get("sha256")
 
 
 def build_storage(settings):
@@ -310,6 +465,14 @@ def build_storage(settings):
             bucket_name=settings.gcs_bucket,
             prefix=settings.gcs_prefix,
             project=settings.gcs_project,
+        )
+
+    if settings.storage_backend == "s3":
+        return S3Storage(
+            bucket_name=settings.s3_bucket,
+            prefix=settings.s3_prefix,
+            region=settings.s3_region,
+            endpoint_url=settings.s3_endpoint_url,
         )
 
     return LocalStorage()

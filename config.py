@@ -61,6 +61,10 @@ class Settings:
     gcs_bucket: Optional[str]
     gcs_prefix: str
     gcs_project: Optional[str]
+    s3_bucket: Optional[str]
+    s3_prefix: str
+    s3_region: Optional[str]
+    s3_endpoint_url: Optional[str]
 
 
 def load_settings() -> Settings:
@@ -84,6 +88,10 @@ def load_settings() -> Settings:
         gcs_bucket=os.getenv("UDYAM_GCS_BUCKET") or None,
         gcs_prefix=os.getenv("UDYAM_GCS_PREFIX", "udyam/raw").strip("/"),
         gcs_project=os.getenv("UDYAM_GCS_PROJECT") or None,
+        s3_bucket=os.getenv("UDYAM_S3_BUCKET") or None,
+        s3_prefix=os.getenv("UDYAM_S3_PREFIX", "udyam/raw").strip("/"),
+        s3_region=os.getenv("UDYAM_S3_REGION") or None,
+        s3_endpoint_url=os.getenv("UDYAM_S3_ENDPOINT_URL") or None,
     )
 
     if settings.batch_size <= 0:
@@ -92,10 +100,12 @@ def load_settings() -> Settings:
         raise ValueError(
             "UDYAM_RETRY_BACKOFF_MAX must be >= UDYAM_RETRY_BACKOFF_BASE"
         )
-    if settings.storage_backend not in {"local", "gcs"}:
-        raise ValueError("UDYAM_STORAGE_BACKEND must be local or gcs")
+    if settings.storage_backend not in {"local", "gcs", "s3"}:
+        raise ValueError("UDYAM_STORAGE_BACKEND must be local, gcs, or s3")
     if settings.storage_backend == "gcs" and not settings.gcs_bucket:
         raise ValueError("UDYAM_GCS_BUCKET is required when UDYAM_STORAGE_BACKEND=gcs")
+    if settings.storage_backend == "s3" and not settings.s3_bucket:
+        raise ValueError("UDYAM_S3_BUCKET is required when UDYAM_STORAGE_BACKEND=s3")
     if settings.log_level not in {
         "DEBUG",
         "INFO",
