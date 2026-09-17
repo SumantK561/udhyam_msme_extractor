@@ -2,9 +2,9 @@ name: Continuous Integration Udyam Extractor
 
 on:
   pull_request:
-    branches: [main, v2-production]
+    branches: [main, v2-production, aws-migration-prod]
   push:
-    branches: [main, v2-production]
+    branches: [main, v2-production, aws-migration-prod]
 
 jobs:
   test:
