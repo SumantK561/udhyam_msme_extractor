@@ -44,6 +44,8 @@ def test_sha256(tmp_path):
 
 
 def test_configuration_defaults(monkeypatch):
+    # Patch load_dotenv so a local .env file cannot bleed into this test.
+    monkeypatch.setattr("config.load_dotenv", lambda: None)
     monkeypatch.delenv("UDYAM_MAX_WORKERS", raising=False)
     monkeypatch.delenv("UDYAM_BATCH_SIZE", raising=False)
     monkeypatch.delenv("UDYAM_MAX_RETRIES", raising=False)
