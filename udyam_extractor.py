@@ -696,7 +696,7 @@ def fetch_batch(
                 temp_path = file.name
 
             cmd = [
-                "curl.exe",
+                "curl",
                 "-sS",
                 "-L",
                 "--connect-timeout",
