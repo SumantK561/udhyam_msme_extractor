@@ -1,0 +1,69 @@
+name: Run Extraction + Load
+
+on:
+  workflow_dispatch:
+    inputs:
+      state:
+        description: "State to extract (leave blank for all states)"
+        required: false
+        default: "ANDAMAN AND NICOBAR ISLANDS"
+      run_id:
+        description: "Resume a specific run ID (leave blank to start a new run)"
+        required: false
+        default: ""
+
+jobs:
+  extract:
+    name: Extract → S3
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run extraction on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 120m
+          script: |
+            cd ~/udhyam_msme_extractor
+            source .venv/bin/activate
+
+            export UDYAM_API_KEY="${{ secrets.UDYAM_API_KEY }}"
+            export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+            export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            export UDYAM_TEST_STATE="${{ github.event.inputs.state }}"
+            export UDYAM_RUN_ID="${{ github.event.inputs.run_id }}"
+
+            python3 run_udyam.py
+
+  load:
+    name: Load → Snowflake RAW
+    runs-on: ubuntu-latest
+    needs: extract
+
+    steps:
+      - name: Run Snowflake loader on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 30m
+          script: |
+            cd ~/udhyam_msme_extractor
+            source .venv/bin/activate
+
+            export SNOWFLAKE_PASSWORD="${{ secrets.SNOWFLAKE_PASSWORD }}"
+
+            # Read the run ID from the most recent run_summary if not provided
+            if [ -z "${{ github.event.inputs.run_id }}" ]; then
+              RUN_ID=$(ls -t output/ | head -1)
+            else
+              RUN_ID="${{ github.event.inputs.run_id }}"
+            fi
+
+            export UDYAM_RUN_ID="$RUN_ID"
+            echo "Loading run_id=$RUN_ID"
+
+            python3 scripts/load_to_snowflake.py
