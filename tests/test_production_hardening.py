@@ -206,3 +206,123 @@ def test_run_summary_contains_failures():
 
     assert summary["failures"][0]["failure_reason"] == "RETRY_EXHAUSTED"
     assert summary["run_status"] == "FAILED"
+
+
+def test_gcs_storage_configuration(monkeypatch):
+    monkeypatch.setenv("UDYAM_STORAGE_BACKEND", "gcs")
+    monkeypatch.setenv("UDYAM_GCS_BUCKET", "prod_us_dataengineering")
+    settings = load_settings()
+    assert settings.storage_backend == "gcs"
+    assert settings.gcs_bucket == "prod_us_dataengineering"
+
+
+def test_gcs_storage_requires_bucket(monkeypatch):
+    monkeypatch.setenv("UDYAM_STORAGE_BACKEND", "gcs")
+    monkeypatch.setenv("UDYAM_GCS_BUCKET", "")
+    with pytest.raises(ValueError, match="UDYAM_GCS_BUCKET"):
+        load_settings()
+
+
+def test_local_storage_validates_checksum(tmp_path):
+    from storage import LocalStorage
+    path = tmp_path / "batch.csv"
+    path.write_bytes(b"abc")
+    record = {
+        "batch_file": str(path),
+        "checksum": extractor.calculate_file_sha256(path),
+    }
+    valid, reason = LocalStorage().validate_artifact(record, extractor.calculate_file_sha256)
+    assert valid is True
+    assert reason == ""
+
+    path.write_bytes(b"tampered")
+    valid, reason = LocalStorage().validate_artifact(record, extractor.calculate_file_sha256)
+    assert valid is False
+    assert reason == "ChecksumMismatch"
+
+
+def test_gcs_object_layout():
+    from storage import GCSStorage
+
+    backend = GCSStorage.__new__(GCSStorage)
+    backend.bucket_name = "prod_us_dataengineering"
+    backend.prefix = "udyam/raw"
+
+    object_name = backend._object_name(
+        "RUN1",
+        "ANDAMAN AND NICOBAR ISLANDS",
+        "RUN1_ANDAMAN AND NICOBAR ISLANDS_0.csv",
+        batch=True,
+    )
+
+    assert object_name == (
+        "udyam/raw/run_id=RUN1/"
+        "state=ANDAMAN AND NICOBAR ISLANDS/batches/"
+        "RUN1_ANDAMAN AND NICOBAR ISLANDS_0.csv"
+    )
+
+
+def test_s3_storage_requires_bucket(monkeypatch):
+    monkeypatch.setenv("UDYAM_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("UDYAM_S3_BUCKET", "")
+    with pytest.raises(ValueError, match="UDYAM_S3_BUCKET"):
+        load_settings()
+
+
+def test_s3_object_layout_and_uri():
+    from storage import S3Storage
+
+    backend = S3Storage.__new__(S3Storage)
+    backend.bucket_name = "prod-us-dataengineering"
+    backend.prefix = "udyam/raw"
+
+    object_name = backend._object_name("RUN1", "GOA", "RUN1_GOA_0.csv", batch=True)
+
+    assert object_name == "udyam/raw/run_id=RUN1/state=GOA/batches/RUN1_GOA_0.csv"
+    assert backend._uri(object_name) == (
+        "s3://prod-us-dataengineering/"
+        "udyam/raw/run_id=RUN1/state=GOA/batches/RUN1_GOA_0.csv"
+    )
+
+
+def _fake_object_store(backend_cls, objects):
+    """Build a backend whose _head reads from an in-memory object map."""
+    backend = backend_cls.__new__(backend_cls)
+    backend.bucket_name = "test-bucket"
+    backend.prefix = "udyam/raw"
+    backend._head = objects.get
+    return backend
+
+
+@pytest.mark.parametrize(
+    "backend_name, scheme, label",
+    [("GCSStorage", "gs", "GCS"), ("S3Storage", "s3", "S3")],
+)
+def test_object_storage_validate_artifact(backend_name, scheme, label):
+    import storage
+
+    objects = {
+        "udyam/raw/run_id=RUN1/state=GOA/batches/batch.csv": (128, "abc123"),
+        "udyam/raw/run_id=RUN1/state=GOA/batches/empty.csv": (0, "abc123"),
+    }
+    backend = _fake_object_store(getattr(storage, backend_name), objects)
+
+    def validate(batch_file, checksum="abc123"):
+        return backend.validate_artifact(
+            {"batch_file": batch_file, "checksum": checksum},
+            extractor.calculate_file_sha256,
+        )
+
+    prefix = f"{scheme}://test-bucket/udyam/raw/run_id=RUN1/state=GOA/batches"
+
+    assert validate(f"{prefix}/batch.csv") == (True, "")
+    assert validate(f"{prefix}/batch.csv", "wrong") == (False, "ChecksumMismatch")
+    assert validate(f"{prefix}/empty.csv") == (False, f"{label}ObjectEmpty")
+    assert validate(f"{prefix}/missing.csv") == (False, f"{label}ObjectNotFound")
+    assert validate("file:///tmp/batch.csv") == (False, f"Invalid{label}Uri")
+    assert validate(f"{scheme}://other-bucket/x.csv") == (
+        False,
+        f"Unexpected{label}Bucket",
+    )
+    assert validate("") == (False, "MissingBatchFile")
+    assert validate(f"{prefix}/batch.csv", "") == (False, "MissingChecksum")

@@ -18,6 +18,7 @@ from typing import Optional
 from uuid import uuid4
 
 from config import load_settings
+from storage import StorageError, build_storage
 
 
 BASE_URL = (
@@ -35,6 +36,7 @@ RETRY_BACKOFF_BASE = SETTINGS.retry_backoff_base
 RETRY_BACKOFF_MAX = SETTINGS.retry_backoff_max
 RETRY_JITTER = SETTINGS.retry_jitter
 RATE_LIMIT_DELAY = SETTINGS.rate_limit_delay
+STORAGE = build_storage(SETTINGS)
 
 RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -359,6 +361,7 @@ def write_run_summary(
             )
 
         temp_path.replace(path)
+        STORAGE.sync_run_summary(run_id, path)
 
     except Exception:
         try:
@@ -429,6 +432,8 @@ def write_batch_manifest(
             file.flush()
             os.fsync(file.fileno())
 
+        STORAGE.sync_manifest(run_id, manifest_path)
+
 
 def get_persisted_batch(
     run_id: str,
@@ -486,33 +491,12 @@ def get_persisted_batch(
 def is_batch_artifact_valid(
     manifest_record,
 ) -> bool:
-    """
-    Verify that the manifest's physical batch artifact exists,
-    is non-empty, and matches the recorded SHA-256 checksum.
-    """
-
-    batch_file = manifest_record.get("batch_file")
-    expected_checksum = manifest_record.get("checksum")
-
-    if not batch_file or not expected_checksum:
-        return False
-
-    path = Path(batch_file)
-
-    try:
-        if not (
-            path.exists()
-            and path.is_file()
-            and path.stat().st_size > 0
-        ):
-            return False
-
-        actual_checksum = calculate_file_sha256(path)
-
-        return actual_checksum == expected_checksum
-
-    except OSError:
-        return False
+    """Validate a persisted batch through the configured storage backend."""
+    valid, _ = STORAGE.validate_artifact(
+        manifest_record,
+        calculate_file_sha256,
+    )
+    return valid
 
 def is_batch_persisted(
     run_id: str,
@@ -1146,34 +1130,12 @@ def extract_state(
         if persisted_batch is not None:
 
             batch_file = persisted_batch.get("batch_file")
-            expected_checksum = persisted_batch.get("checksum")
+            _, validation_reason = STORAGE.validate_artifact(
+                persisted_batch,
+                calculate_file_sha256,
+            )
 
-            if not batch_file:
-                validation_reason = "MissingBatchFile"
-
-            elif not Path(batch_file).exists():
-                validation_reason = "BatchFileNotFound"
-
-            elif not Path(batch_file).is_file():
-                validation_reason = "BatchPathNotFile"
-
-            elif Path(batch_file).stat().st_size <= 0:
-                validation_reason = "BatchFileEmpty"
-
-            elif not expected_checksum:
-                validation_reason = "MissingChecksum"
-
-            else:
-                actual_checksum = calculate_file_sha256(
-                    Path(batch_file)
-                )
-
-                if actual_checksum != expected_checksum:
-                    validation_reason = "ChecksumMismatch"
-                else:
-                    validation_reason = None
-
-            if validation_reason is not None:
+            if validation_reason:
                 logger.error(
                     "BATCH ARTIFACT VALIDATION FAILED | "
                     "State=%s | "
@@ -1188,22 +1150,15 @@ def extract_state(
                     batch_file,
                 )
 
-                cp.update(
-                    {
-                        "status": "FAILED",
-                        "last_completed_offset": offset,
-                        "records_written": written,
-                        "total_records": total,
-                    }
-                )
-
-                save_checkpoint(
+                return mark_state_failed(
+                    cp,
                     run_id,
                     state,
-                    cp,
+                    logger,
+                    reason="BATCH_ARTIFACT_INVALID",
+                    stage="ARTIFACT_VALIDATION",
+                    detail=validation_reason,
                 )
-
-                return cp
 
             recovered_count = int(
                 persisted_batch.get(
@@ -1450,46 +1405,38 @@ def extract_state(
 
         batch_offset = offset
 
-        batch_file = batch_output_path(
-            run_id,
-            state,
-            batch_offset,
-        )
-
-        # If the final artifact exists without a SUCCESS manifest, do not
-        # overwrite it. Fail closed so the orphaned artifact can be inspected.
-        if batch_file.exists():
-            logger.error(
-                "BATCH ARTIFACT EXISTS WITHOUT MANIFEST | "
-                "State=%s | "
-                "Offset=%s | "
-                "BatchFile=%s",
-                state,
-                batch_offset,
-                batch_file,
-            )
-
-            cp.update(
-                {
-                    "status": "FAILED",
-                    "last_completed_offset": offset,
-                    "records_written": written,
-                    "total_records": total,
-                }
-            )
-
-            save_checkpoint(
+        if SETTINGS.storage_backend == "local":
+            batch_file = batch_output_path(
                 run_id,
                 state,
-                cp,
+                batch_offset,
             )
 
-            return cp
+            # If the final artifact exists without a SUCCESS manifest, do not
+            # overwrite it. Fail closed so the orphaned artifact can be inspected.
+            if batch_file.exists():
+                logger.error(
+                    "BATCH ARTIFACT EXISTS WITHOUT MANIFEST | "
+                    "State=%s | Offset=%s | BatchFile=%s",
+                    state,
+                    batch_offset,
+                    batch_file,
+                )
+                return mark_state_failed(
+                    cp,
+                    run_id,
+                    state,
+                    logger,
+                    reason="ORPHAN_BATCH_ARTIFACT",
+                    stage="ARTIFACT_PERSISTENCE",
+                    detail=str(batch_file),
+                )
+        else:
+            staging_dir = OUTPUT_ROOT / run_id / ".staging"
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            batch_file = staging_dir / f"{get_batch_id(run_id, state, batch_offset)}.csv"
 
-        written_count = write_batch_file(
-            batch_file,
-            records,
-        )
+        written_count = write_batch_file(batch_file, records)
 
         # Protect against an unexpected persistence count mismatch.
         if written_count != count:
@@ -1524,17 +1471,42 @@ def extract_state(
             return cp
 
         # -------------------------------------------------------------------
+        # Publish the batch to the configured RAW storage backend.
+        # -------------------------------------------------------------------
+
+        checksum = calculate_file_sha256(batch_file)
+
+        try:
+            persisted_batch_file = STORAGE.publish_batch(
+                batch_file,
+                run_id,
+                state,
+                batch_offset,
+                checksum,
+            )
+        except StorageError as exc:
+            return mark_state_failed(
+                cp,
+                run_id,
+                state,
+                logger,
+                reason="STORAGE_UPLOAD_FAILED",
+                stage="RAW_PERSISTENCE",
+                detail=str(exc),
+            )
+        finally:
+            if SETTINGS.storage_backend == "gcs":
+                try:
+                    batch_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        # -------------------------------------------------------------------
         # Update counters
         # -------------------------------------------------------------------
 
         written += written_count
         offset += written_count
-
-        # -------------------------------------------------------------------
-        # Batch integrity
-        # -------------------------------------------------------------------
-
-        checksum = calculate_file_sha256(batch_file)
 
         # -------------------------------------------------------------------
         # Manifest persistence
@@ -1558,7 +1530,7 @@ def extract_state(
             state=state,
             offset=batch_offset,
             record_count=written_count,
-            batch_path=batch_file,
+            batch_path=persisted_batch_file,
             checksum=checksum,
             status="SUCCESS",
         )

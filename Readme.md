@@ -1,6 +1,6 @@
 # Udyam MSME Extractor
 
-**Version 2.0.0**
+**Version 3.0.0**
 
 Production-grade Python pipeline for extracting MSME registered-unit data from the Government of India's Udyam dataset via the `data.gov.in` API. Designed for Supplier.io's supplier intelligence ingestion workflow.
 
@@ -8,7 +8,7 @@ Production-grade Python pipeline for extracting MSME registered-unit data from t
 
 ## What It Does
 
-Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian state at a time, with parallel state workers. Each API page (10,000 records) is atomically persisted as an individual CSV artifact. Interrupted runs resume from the last successfully persisted batch. Previously persisted and validated batches are not re-fetched; failed or incomplete API requests may be retried.
+Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian state at a time, with parallel state workers. Each API page (10,000 records) is atomically persisted as an individual CSV artifact. Completed batches are published directly to Amazon S3 or Google Cloud Storage. An idempotent Snowflake loader reads from the cloud stage and loads into the RAW layer with full row-count reconciliation and a per-batch idempotency ledger.
 
 **Source dataset:** [List of MSME Registered Units under UDYAM](https://www.data.gov.in/)
 **Publisher:** Ministry of Micro, Small and Medium Enterprises, Government of India
@@ -43,10 +43,14 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Bounded exponential backoff with configurable jitter and rate-limit delay
 - Automated pytest regression suite
 - Windows CI workflow for pull requests and pushes
+- Multi-cloud RAW storage backend: **Amazon S3** and Google Cloud Storage
+- Object metadata carries the extractor SHA-256 for remote artifact validation
+- Idempotent **Snowflake RAW loader** with per-batch ledger, row-count reconciliation, and fail-closed LOADING guard
+- Snowflake connected to S3 via Storage Integration (no long-lived AWS keys in Snowflake)
+- Least-privilege IAM policy for the extractor service account (`s3:PutObject`, `s3:GetObject` scoped to prefix)
 
 ### Planned
-- Object-storage landing layer (raw CSV → cloud bucket)
-- Snowflake ingestion (RAW layer)
+
 - dbt Bronze / Silver / Gold transformations
 - Airflow orchestration and scheduling
 - CD deployment pipeline to the production Windows Server
@@ -66,11 +70,11 @@ Government of India
 Python Extraction Service   ◄── Airflow (orchestration, retries, scheduling)
         │
         ▼
-Raw / Landing Storage
-(CSV batch artifacts)
+  Amazon S3 RAW
+  (CSV batch artifacts)
         │
         ▼
-   Snowflake RAW
+   Snowflake RAW             ◄── Idempotent loader (scripts/load_to_snowflake.py)
         │
         ▼
     dbt BRONZE
@@ -85,7 +89,7 @@ Raw / Landing Storage
 BI / Analytics / ML
 ```
 
-Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Server) span all layers. The extractor currently implements the extraction and local persistence layer only.
+Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Server) span all layers.
 
 ---
 
@@ -107,6 +111,8 @@ Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Serv
 - Durable run summary artifact (`run_summary.json`) written atomically at end of every run
 - Per-execution log file
 - API key stored in `.env`, never in source
+- Multi-cloud storage: publish batches to **S3** (`s3://`) or GCS (`gs://`) as they complete
+- Idempotent Snowflake loader with per-batch ledger and row-count reconciliation
 
 ---
 
@@ -116,18 +122,24 @@ Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Serv
 Udyam_MSME/
 ├── udyam_extractor.py        # Core extraction engine
 ├── run_udyam.py              # Entry point and runtime config
-├── .env                      # API key (not committed)
-├── .gitignore
-├── Readme.md
-├── config.py                  # Environment-driven runtime configuration
+├── config.py                 # Environment-driven runtime configuration
+├── storage.py                # Local / S3 / GCS RAW storage abstraction
 ├── requirements.txt
 ├── requirements-dev.txt
+├── .env                      # Secrets (not committed)
 ├── .env.example
+├── .gitignore
+├── Readme.md
 ├── .github/
 │   └── workflows/
-│       └── ci.yml             # Automated Windows CI
+│       └── ci.yml            # Automated Windows CI
 ├── scripts/
-│   └── preflight.ps1          # Production host readiness checks
+│   ├── load_to_snowflake.py  # Idempotent S3 → Snowflake RAW loader
+│   └── preflight.ps1         # Production host readiness checks
+├── snowflake/
+│   ├── part 1.sql            # Role, user, database, schema, tables, file formats
+│   ├── part 2.sql            # S3 Storage Integration
+│   └── part 3.sql            # External stage + verification
 ├── tests/
 │   └── test_production_hardening.py
 │
@@ -138,7 +150,6 @@ Udyam_MSME/
 │       └── <state>/
 │           └── batches/
 │               ├── <run_id>_<state>_0.csv
-│               ├── <run_id>_<state>_10000.csv
 │               └── ...
 │
 ├── checkpoints/              # Runtime — not committed
@@ -174,13 +185,13 @@ pip install -r requirements-dev.txt
 
 **1. Clone the repository and navigate to the project root.**
 
-**2. Create a `.env` file:**
+**2. Create a `.env` file from the template:**
 
-```env
-UDYAM_API_KEY=YOUR_API_KEY
+```powershell
+Copy-Item .env.example .env
 ```
 
-Never commit `.env` to Git.
+Then fill in your values. Never commit `.env` to Git.
 
 **3. Verify `curl.exe` is available:**
 
@@ -192,7 +203,7 @@ curl.exe --version
 
 ## Configuration
 
-Runtime configuration is centralized in `config.py` and can be supplied through environment variables or `.env`. This keeps deployment-specific values out of source code.
+Runtime configuration is centralized in `config.py` and supplied through environment variables or `.env`.
 
 | Variable | Default | Purpose |
 |---|---:|---|
@@ -207,11 +218,109 @@ Runtime configuration is centralized in `config.py` and can be supplied through 
 | `UDYAM_RETRY_JITTER` | `3` | Random retry jitter (seconds) |
 | `UDYAM_RATE_LIMIT_DELAY` | `30` | Minimum delay after HTTP 429 (seconds) |
 | `UDYAM_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
+| `UDYAM_STORAGE_BACKEND` | `local` | `local`, `s3`, or `gcs` |
+| `UDYAM_S3_BUCKET` | — | Required for S3 mode; target RAW bucket |
+| `UDYAM_S3_PREFIX` | `udyam/raw` | S3 RAW object prefix |
+| `UDYAM_S3_REGION` | — | AWS region (e.g. `ap-south-2`) |
+| `UDYAM_S3_ENDPOINT_URL` | — | Optional; for S3-compatible endpoints |
+| `UDYAM_GCS_BUCKET` | — | Required for GCS mode; target RAW bucket |
+| `UDYAM_GCS_PREFIX` | `udyam/raw` | GCS RAW object prefix |
+| `UDYAM_GCS_PROJECT` | — | Optional GCP project used by the GCS client |
 
-`UDYAM_API_KEY` remains a required secret and must not be committed.
+`UDYAM_API_KEY` is a required secret and must not be committed.
 
-Use `.env.example` as the deployment template. The checked-in repository remains configured for a controlled single-state run.
+---
 
+## S3 RAW Storage
+
+The extractor publishes each completed batch directly to Amazon S3. Credentials resolve via the standard AWS chain (environment variables, shared config, or IAM role/task role).
+
+```env
+UDYAM_STORAGE_BACKEND=s3
+UDYAM_S3_BUCKET=supplier-udyam-raw
+UDYAM_S3_PREFIX=udyam/raw
+UDYAM_S3_REGION=ap-south-2
+```
+
+The S3 layout mirrors the GCS layout:
+
+```text
+s3://<bucket>/udyam/raw/
+└── run_id=<run_id>/
+    ├── manifest.jsonl
+    ├── run_summary.json
+    └── state=<state>/batches/<batch_id>.csv
+```
+
+Each batch upload stores the SHA-256 in object metadata. Post-upload verification reads it back via `HeadObject` (covered by `s3:GetObject`). A resumed run verifies the remote object's presence, size, and checksum before skipping a completed batch.
+
+### IAM policy for the extractor service account
+
+Scope permissions to the `udyam/raw/` prefix only:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::supplier-udyam-raw/udyam/raw/*"
+    }
+  ]
+}
+```
+
+### Connecting Snowflake to S3
+
+Snowflake reads from S3 via a Storage Integration — no AWS keys are stored in Snowflake. See `snowflake/part 2.sql` and `snowflake/part 3.sql` for the integration and stage DDL.
+
+---
+
+## GCS RAW Storage
+
+```env
+UDYAM_STORAGE_BACKEND=gcs
+UDYAM_GCS_BUCKET=your-gcs-bucket
+UDYAM_GCS_PREFIX=udyam/raw
+```
+
+Uses Application Default Credentials. Do not place service-account keys in the repository.
+
+---
+
+## Snowflake RAW Loader
+
+`scripts/load_to_snowflake.py` is an idempotent loader that reads the run manifest from the Snowflake external stage and loads each SUCCESS batch into the RAW table.
+
+```powershell
+$env:UDYAM_RUN_ID = "20260917T174515Z_4366d444"
+python scripts/load_to_snowflake.py
+```
+
+| Variable | Purpose |
+|---|---|
+| `SNOWFLAKE_ACCOUNT` | Account identifier (e.g. `ORGNAME-ACCOUNTNAME`) |
+| `SNOWFLAKE_USER` | Service user (e.g. `UDYAM_SVC`) |
+| `SNOWFLAKE_AUTHENTICATOR` | `snowflake` (password) or `externalbrowser` (SSO) |
+| `SNOWFLAKE_PASSWORD` | Required when authenticator is `snowflake` |
+| `SNOWFLAKE_ROLE` | Role with loader privileges (e.g. `UDYAM_LOADER`) |
+| `SNOWFLAKE_WAREHOUSE` | Compute warehouse |
+| `SNOWFLAKE_DATABASE` | Target database |
+| `SNOWFLAKE_SCHEMA` | Target schema |
+| `SNOWFLAKE_STAGE` | External stage name (e.g. `S3_STAGE`) |
+| `SNOWFLAKE_RAW_TABLE` | RAW landing table (default `MSME`) |
+| `SNOWFLAKE_INGESTION_BATCH_TABLE` | Idempotency ledger (default `INGESTION_BATCH`) |
+| `UDYAM_RUN_ID` | Run to load — must be set explicitly |
+
+**Load flow:**
+1. Read `manifest.jsonl` for the configured `UDYAM_RUN_ID` from the external stage
+2. For each `SUCCESS` batch: check the `INGESTION_BATCH` ledger
+3. Skip if already `LOADED` with matching row count and checksum
+4. Fail closed if status is `LOADING` (ambiguous — investigate before retrying)
+5. `COPY INTO` the RAW table, verify row count, update ledger; commit both atomically
+
+See `snowflake/part 1.sql` for the full DDL (role, user, tables, file formats).
 
 ---
 
@@ -220,29 +329,35 @@ Use `.env.example` as the deployment template. The checked-in repository remains
 ### Single state (for testing)
 
 ```powershell
-$env:UDYAM_TEST_STATE = "BIHAR"
+$env:UDYAM_TEST_STATE = "GOA"
 python .\run_udyam.py
 ```
 
 ### Full extraction (all states)
 
+Remove or blank `UDYAM_TEST_STATE` in `.env`, then:
+
 ```powershell
-$env:UDYAM_TEST_STATE = "ALL"
 python .\run_udyam.py
 ```
-
-Or set `UDYAM_TEST_STATE=ALL` in `.env` for a persistent configuration.
 
 ### Resume a specific run
 
 ```powershell
-$env:UDYAM_RUN_ID = "20260912T165020Z_0ab2cda0"
+$env:UDYAM_RUN_ID = "20260917T174515Z_4366d444"
 python .\run_udyam.py
 ```
 
 When `UDYAM_RUN_ID` is not set, a new run ID is generated automatically.
 
 **Exit codes:** `0` = all states completed + reconciliation passed | `1` = failure
+
+### Load to Snowflake
+
+```powershell
+$env:UDYAM_RUN_ID = "20260917T174515Z_4366d444"
+python scripts/load_to_snowflake.py
+```
 
 ---
 
@@ -257,11 +372,9 @@ Every execution gets a unique timestamp-based run ID:
   └─ UTC timestamp   └─ 8-char UUID-derived suffix (uuid4().hex[:8])
 ```
 
-All output and checkpoint paths are scoped to this run ID.
+All output, checkpoint, and S3 paths are scoped to this run ID.
 
 ### Pagination
-
-The API is queried with increasing offsets until the full state record count is retrieved:
 
 ```
 offset=0,     limit=10000  → Batch 1
@@ -272,8 +385,6 @@ offset=20000, limit=10000  → Batch 3
 
 ### Persistence Order
 
-For each batch, persistence happens in strict order:
-
 ```
 API response
     ↓
@@ -281,12 +392,14 @@ Atomic batch CSV   (temp write → fsync → replace)
     ↓
 SHA-256 checksum
     ↓
+S3 upload          (PutObject + HeadObject verification)
+    ↓
 Manifest entry     (SUCCESS appended to manifest.jsonl)
     ↓
 Atomic checkpoint  (state progress updated)
 ```
 
-Recovery trusts a batch only when **both** a manifest entry and a non-empty physical file exist. An orphaned artifact (file without manifest entry) causes a hard stop rather than an overwrite.
+Recovery trusts a batch only when **both** a manifest entry and a validated remote object exist.
 
 ### Short-Page Protection
 
@@ -296,21 +409,9 @@ A page with fewer than 10,000 records is accepted only when it is the final page
 offset + record_count >= API total
 ```
 
-If the API returns a short page mid-extraction, the same offset is retried. This prevents transient API truncation from silently ending a run early.
-
 ### Parallel Processing
 
-Up to `MAX_WORKERS` states are extracted concurrently:
-
-```
-Run
- ├── ANDAMAN AND NICOBAR ISLANDS  ── Worker 1
- ├── ANDHRA PRADESH               ── Worker 2
- └── ARUNACHAL PRADESH            ── Worker 3
-        (next state picks up when a worker finishes)
-```
-
-Start conservatively at `MAX_WORKERS = 3`. The Udyam API can throttle under high concurrency.
+Up to `MAX_WORKERS` states are extracted concurrently. Start at `3` — the Udyam API can throttle under high concurrency.
 
 ### Reconciliation
 
@@ -321,33 +422,26 @@ API total records == records written
 
 Run-level (after all states complete):
 ```
-All states = COMPLETED
-AND  SUM(API totals) == SUM(records written)
+All states = COMPLETED  AND  SUM(API totals) == SUM(records written)
 ```
-
-A mismatch at either level causes a failure.
 
 ### Checkpoints
 
-One checkpoint file per state per run at `checkpoints/<run_id>/<state>.json`:
-
 ```json
 {
-    "run_id": "20260912T165020Z_0ab2cda0",
-    "state": "ANDAMAN AND NICOBAR ISLANDS",
-    "total_records": 18058,
-    "records_written": 18058,
-    "last_completed_offset": 18058,
+    "run_id": "20260917T174515Z_4366d444",
+    "state": "GOA",
+    "total_records": 86010,
+    "records_written": 86010,
+    "last_completed_offset": 86010,
     "status": "COMPLETED",
-    "updated_at": "2026-09-12T16:51:22+00:00"
+    "updated_at": "2026-09-17T17:48:00+00:00"
 }
 ```
 
 Status values: `NOT_STARTED` | `IN_PROGRESS` | `COMPLETED` | `FAILED`
 
 ### Failure Metadata
-
-Failed states retain machine-readable failure information in their checkpoints:
 
 ```json
 {
@@ -357,42 +451,31 @@ Failed states retain machine-readable failure information in their checkpoints:
     "failure_detail": "Failed to fetch state=...",
     "retry_count": 5,
     "http_status": 503,
-    "failed_at": "2026-09-14T..."
+    "failed_at": "2026-09-17T..."
 }
 ```
 
-The same failure information is surfaced in `run_summary.json`, making failures consumable by future orchestration and monitoring systems without parsing log text.
-
 ### Graceful Shutdown
 
-`Ctrl+C` (`SIGINT`) or `SIGTERM` requests a cooperative shutdown. The current API request is allowed to finish, then workers stop before starting another batch. Checkpoints remain resumable and the process exits with code `1`.
+`Ctrl+C` (`SIGINT`) or `SIGTERM` requests a cooperative shutdown. The current API request finishes, workers stop before starting another batch, and the process exits with code `1`. Checkpoints remain resumable.
 
 ### API Retry Policy
 
-The extractor retries transient curl failures, HTTP `429`, HTTP `500`, `502`, `503`, and `504`, using bounded exponential backoff and jitter. Non-retryable HTTP 4xx responses fail the state immediately. Rate-limited responses use at least `UDYAM_RATE_LIMIT_DELAY`.
+Retries transient curl failures, HTTP `429`, `500`, `502`, `503`, `504` using bounded exponential backoff and jitter. Non-retryable HTTP 4xx responses fail the state immediately.
 
 ### Resume Behavior
 
-If a run is interrupted, re-run with the same `UDYAM_RUN_ID`:
-
 ```
-State A  → status=COMPLETED           → SKIP
-State B  → status=IN_PROGRESS         → RESUME from last_completed_offset
-           last_completed_offset=30000
-State C  → status=FAILED              → Restart state; previously persisted
-                                         batches are recovered, remaining
-                                         batches are fetched
+State A  → COMPLETED      → SKIP
+State B  → IN_PROGRESS    → RESUME from last_completed_offset
+State C  → FAILED         → Restart; recovered batches are validated, remaining fetched
 ```
-
-Previously persisted batches (validated via manifest + artifact check) are not re-fetched.
 
 ---
 
 ## Output
 
 ### CSV Schema
-
-Each batch file contains these columns:
 
 | Column | Description |
 |---|---|
@@ -406,205 +489,82 @@ Each batch file contains these columns:
 | `CommunicationAddress` | Enterprise address |
 | `Activities` | JSON array of NIC codes and descriptions |
 
-`Activities` example:
-```json
-[{"NIC5DigitId": "79110", "Description": "Travel agency activities"}]
-```
-
-### Batch File Naming
-
-```
-<run_id>_<state>_<offset>.csv
-```
-
-Example:
-```
-20260912T165020Z_0ab2cda0_ANDAMAN AND NICOBAR ISLANDS_0.csv
-20260912T165020Z_0ab2cda0_ANDAMAN AND NICOBAR ISLANDS_10000.csv
-```
-
 ### Manifest
 
-`output/<run_id>/manifest.jsonl` — one line per successfully persisted batch. The `checksum` field holds the SHA-256 hex digest of the batch CSV, computed immediately after the atomic write and verified against the file on resume:
+`manifest.jsonl` — one line per successfully persisted batch:
 
 ```json
 {
-    "batch_id": "20260912T165020Z_0ab2cda0_ANDAMAN AND NICOBAR ISLANDS_0",
-    "run_id": "20260912T165020Z_0ab2cda0",
-    "state": "ANDAMAN AND NICOBAR ISLANDS",
+    "batch_id": "20260917T174515Z_4366d444_GOA_0",
+    "run_id": "20260917T174515Z_4366d444",
+    "state": "GOA",
     "offset": 0,
     "record_count": 10000,
-    "batch_file": "output\\...\\ANDAMAN AND NICOBAR ISLANDS\\batches\\...csv",
+    "batch_file": "s3://supplier-udyam-raw/udyam/raw/run_id=.../state=GOA/batches/....csv",
     "checksum": "a3f1c2d4e5b6...",
     "status": "SUCCESS",
-    "persisted_at": "2026-09-12T16:50:54.146875+00:00"
+    "persisted_at": "2026-09-17T17:45:15+00:00"
 }
 ```
 
 ### Run Summary
 
-`output/<run_id>/run_summary.json` — written atomically at the end of every run (success or failure):
+`run_summary.json` — written atomically at the end of every run:
 
 ```json
 {
-    "run_id": "20260912T165020Z_0ab2cda0",
-    "started_at": "2026-09-12T16:50:20+00:00",
-    "completed_at": "2026-09-12T16:51:25+00:00",
-    "requested_states": 32,
-    "completed_states": 31,
-    "failed_states": 1,
-    "expected_records": 43417872,
-    "actual_records": 43399814,
-    "reconciliation_status": "FAILED",
-    "run_status": "FAILED",
-    "failures": [
-        {
-            "state": "MAHARASHTRA",
-            "failure_reason": "RETRY_EXHAUSTED",
-            "failure_stage": "API_FETCH",
-            "failure_detail": "Failed to fetch state=MAHARASHTRA offset=...",
-            "retry_count": 5,
-            "http_status": 503,
-            "failed_at": "2026-09-12T16:51:10+00:00"
-        }
-    ]
+    "run_id": "20260917T174515Z_4366d444",
+    "started_at": "2026-09-17T17:45:15+00:00",
+    "completed_at": "2026-09-17T17:48:00+00:00",
+    "requested_states": 2,
+    "completed_states": 2,
+    "failed_states": 0,
+    "expected_records": 104114,
+    "actual_records": 104114,
+    "reconciliation_status": "PASSED",
+    "run_status": "COMPLETED"
 }
 ```
-
-`reconciliation_status` is `"PASSED"` or `"FAILED"`. `run_status` is `"COMPLETED"` or `"FAILED"` — a run with any failed states is always `"FAILED"` regardless of reconciliation outcome. The `failures` array contains one entry per failed state with structured machine-readable failure metadata. The file uses the same atomic temp-write → `fsync` → replace pattern as batch CSVs and checkpoints.
-
----
-
-## Logging
-
-A new log file is created per execution at `logs/udyam_<YYYYMMDD_HHMMSS>.log`.
-
-Log entries cover: run ID, state, API request details, HTTP status, offset, retry attempts, failure reasons, records retrieved/written, batch/state/overall elapsed times, and final summary.
-
-Timing is emitted at three levels:
-
-```
-BATCH COMPLETE   | Batch=2 | BatchRecords=10000 | Progress=10000/18058 | BatchElapsed=00:01:12
-STATE COMPLETED  | State=ANDAMAN AND NICOBAR ISLANDS | Records=18058 | Elapsed=00:02:31
-Total elapsed time=00:02:35
-```
-
----
-
-## Pre-Production Checklist
-
-Before running the full 43M-record extraction:
-
-1. Run the preflight script: `.\scripts\preflight.ps1`
-2. Run the test suite: `python -m pytest -q`
-3. Run a single state: `$env:UDYAM_TEST_STATE = "BIHAR"` then `python .\run_udyam.py`
-4. Validate generated CSVs — row counts, column completeness, `Activities` JSON
-5. Confirm record counts match the API `total` field in the log and `run_summary.json`
-6. Review log for timeout frequency
-7. Test checkpoint and resume: kill mid-run, re-run with the same `UDYAM_RUN_ID`
-8. Confirm `run_summary.json` reports `run_status: "COMPLETED"` and `reconciliation_status: "PASSED"`
-9. Then set `UDYAM_TEST_STATE=ALL` and run all states
-
-Recommended `.env` for initial validation:
-
-```env
-UDYAM_TEST_STATE=BIHAR
-UDYAM_MAX_WORKERS=3
-```
-
-After validation:
-
-```env
-UDYAM_TEST_STATE=ALL
-UDYAM_MAX_WORKERS=3
-```
-
----
-
-## Troubleshooting
-
-### API timeout (`curl` return code 28)
-
-```
-CURL FAILURE | ReturnCode=28
-```
-
-Automatic retry will handle transient timeouts. If timeouts are frequent, reduce `UDYAM_MAX_WORKERS` in `.env`:
-
-```env
-UDYAM_MAX_WORKERS=2
-```
-
-### Missing API key
-
-```
-UDYAM_API_KEY is not configured.
-```
-
-Ensure `.env` exists in the project root and contains:
-
-```env
-UDYAM_API_KEY=YOUR_API_KEY
-```
-
-### Orphaned batch artifact
-
-The extractor fails closed if a CSV file exists on disk without a corresponding manifest entry. Investigate before deleting the file — this indicates an interrupted write sequence. Delete the orphaned file only after confirming it is incomplete or zero-byte.
 
 ---
 
 ## Automated Testing and CI
-
-Run the local regression suite:
 
 ```powershell
 pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-The repository includes a Windows GitHub Actions workflow at `.github/workflows/ci.yml`. Pull requests and pushes run Python compilation and the automated test suite.
+The repository includes a Windows GitHub Actions workflow at `.github/workflows/ci.yml`.
 
 ## Production Host Preflight
-
-Before deploying to the Windows Server, run:
 
 ```powershell
 .\scripts\preflight.ps1
 ```
 
-The preflight verifies Python 3.10+, `curl.exe`, required runtime directories, Python compilation, and the presence of `UDYAM_API_KEY` when `.env` exists.
-
-CI validates the application code; production deployment/CD remains a separate next phase.
+Verifies Python 3.10+, `curl.exe`, required runtime directories, Python compilation, and `UDYAM_API_KEY`.
 
 ## Security
 
-- Store the API key only in `.env`
-- `.env` is excluded from Git via `.gitignore`
-- If a key is accidentally committed: revoke it immediately, purge from history, issue a new key
-
----
-
-## .gitignore
-
-```gitignore
-.env
-__pycache__/
-.pytest_cache/
-*.py[cod]
-output/
-checkpoints/
-logs/
-venv/
-.venv/
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-```
+- Store all secrets only in `.env` — excluded from Git via `.gitignore`
+- AWS credentials resolve via the standard chain; do not hard-code keys
+- Snowflake uses a Storage Integration for S3 access — no AWS keys stored in Snowflake
+- IAM policy is scoped to the `udyam/raw/` prefix with minimum required actions only
+- If a key is accidentally committed: revoke immediately, purge from history, issue a new key
 
 ---
 
 ## Version History
+
+### 3.0.0 — AWS migration and Snowflake RAW ingestion
+
+- **Amazon S3 storage backend** — `UDYAM_STORAGE_BACKEND=s3` publishes batches directly to S3 using `boto3`; SHA-256 stored in object metadata and verified post-upload
+- **Multi-cloud storage abstraction** — shared `ObjectStorage` base class; `GCSStorage` and `S3Storage` subclasses implement only `_upload` / `_head`; all layout, verification, and manifest sync logic is shared
+- **Idempotent Snowflake RAW loader** (`scripts/load_to_snowflake.py`) — reads manifest from Snowflake external stage, loads each SUCCESS batch via `COPY INTO`, reconciles row counts, and maintains a per-batch `INGESTION_BATCH` ledger; supports both password and SSO authentication
+- **Snowflake S3 Storage Integration** — Snowflake reads from S3 via IAM role trust, no long-lived AWS keys in Snowflake; DDL in `snowflake/` directory
+- **Least-privilege IAM** — extractor service account limited to `s3:PutObject` + `s3:GetObject` scoped to `udyam/raw/*`
+- First end-to-end vertical slice: extraction → S3 → Snowflake RAW (104,114 rows verified)
 
 ### 2.0.0 — Production hardening
 
@@ -615,36 +575,20 @@ Thumbs.db
 - Configurable bounded exponential backoff, jitter, and rate-limit delay
 - Automated pytest regression suite
 - Windows GitHub Actions CI
-- `requirements.txt`, `requirements-dev.txt`, `.env.example`, and Windows preflight support
+- GCS RAW storage backend with object metadata SHA-256 verification
 
 ### 1.7.0 — SHA-256 batch artifact integrity
 
-- SHA-256 checksum (`hashlib`) computed on every batch CSV immediately after atomic write
-- Checksum stored in each `manifest.jsonl` entry as a new `checksum` field
-- `is_batch_artifact_valid` now performs cryptographic verification in addition to existence and size checks
-- Resume recovery enumerates six named failure reasons: `MissingBatchFile`, `BatchFileNotFound`, `BatchPathNotFile`, `BatchFileEmpty`, `MissingChecksum`, `ChecksumMismatch`
-- `calculate_file_sha256(path)` reads in 1 MB chunks for memory-efficient hashing of large batch files
+- SHA-256 checksum computed on every batch CSV immediately after atomic write
+- Checksum stored in each `manifest.jsonl` entry and verified on resume
 
 ### 1.6.0 — Durable run summary
 
-- Durable `run_summary.json` artifact written atomically at end of every run (success and failure paths)
-- Run summary schema: `run_id`, `started_at`, `completed_at`, `requested_states`, `completed_states`, `failed_states`, `expected_records`, `actual_records`, `reconciliation_status`, `run_status`
-- `started_at` / `completed_at` captured as UTC wall-clock timestamps (separate from `perf_counter` timing)
-- `build_run_summary()` in `run_udyam.py`; `write_run_summary()` + `get_run_summary_path()` in `udyam_extractor.py`
+- Durable `run_summary.json` artifact written atomically at end of every run
 
 ### 1.5.0 — Production reliability and reconciliation
 
-- Timestamp-based run identity with UUID-derived suffix (`YYYYMMDDTHHMMSSZ_<8hexchars>`)
-- Deterministic batch identity (`run_id_state_offset`)
-- Atomic batch CSV persistence via temp-file replacement
-- Append-only batch manifest (`manifest.jsonl`)
-- Atomic checkpoint persistence
-- Batch artifact validation on resume
-- Fail-closed orphaned artifact handling
-- Short-page pagination safety
-- State-level reconciliation
-- Run-level reconciliation
-- Exit code reflects run success (`0` / `1`)
+- Timestamp-based run identity, atomic persistence, manifest, checkpoints, reconciliation, and exit codes
 
 ---
 
@@ -653,24 +597,19 @@ Thumbs.db
 **Platform:** Government of India Open Government Data Platform — https://www.data.gov.in/
 **Dataset:** List of MSME Registered Units under UDYAM
 **Resource ID:** `8b68ae56-84cf-4728-a0a6-1be11028dea7`
-**Catalog UUID:** `0536e86e-3751-4054-84e5-e257d4c94477`
 **Reported volume:** 43,417,872+ records
 
 ---
 
 ## Known Limitations
 
-- The source API does not provide a stable record-level unique identifier for enterprises.
-- Current persistence format is CSV; Parquet / object-storage landing is planned.
-- Batch artifact validation verifies file existence, non-zero size, and SHA-256 checksum against the manifest; record-level semantic integrity checks are not performed at extraction time.
-- Record-level duplicate detection is not performed by the extractor — deduplication belongs in a downstream Silver-layer transform.
-- API totals are used for extraction reconciliation but do not establish enterprise uniqueness.
-- Run metadata is represented through logs, checkpoints, the batch manifest, and `run_summary.json`; a dedicated upstream ingestion trigger based on this file is planned.
-- CI (GitHub Actions, Windows runner) validates code on every push and PR; CD deployment to the production Windows Server is a separate planned phase.
-- `MAX_WORKERS` concurrency is bounded by Udyam API stability, not local resources — increasing it without validating API behavior can cause widespread timeouts.
+- No stable record-level unique identifier in the source API
+- RAW persistence is CSV; Parquet can be introduced without changing the extraction contract
+- Record-level duplicate detection belongs in a downstream Silver-layer transform
+- `MAX_WORKERS` is bounded by Udyam API stability — increase gradually
 
 ---
 
 ## Disclaimer
 
-Record counts and dataset content are based on Udyam metadata available at the time of extraction. The source is updated periodically. The reported record count does not represent unique companies or suppliers without additional entity-level validation and deduplication.
+Record counts and dataset content are based on Udyam metadata available at the time of extraction. The source is updated periodically. The reported record count does not represent unique companies or suppliers without additional entity-level deduplication.
