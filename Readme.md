@@ -1,6 +1,6 @@
 # Udyam MSME Extractor
 
-**Version 3.0.0**
+**Version 3.1.0**
 
 Production-grade Python pipeline for extracting MSME registered-unit data from the Government of India's Udyam dataset via the `data.gov.in` API. Designed for Supplier.io's supplier intelligence ingestion workflow.
 
@@ -42,7 +42,9 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Retry classification for curl failures, HTTP 429, and transient HTTP 5xx responses
 - Bounded exponential backoff with configurable jitter and rate-limit delay
 - Automated pytest regression suite
-- Windows CI workflow for pull requests and pushes
+- Cross-platform `curl` (Linux and Windows)
+- GitHub Actions CI (test), CD (auto-deploy to EC2 on merge to main), and manual pipeline trigger with state dropdown
+- EC2 Linux deployment (Ubuntu 24.04, t3.micro) with virtualenv and screen-based long runs
 - Multi-cloud RAW storage backend: **Amazon S3** and Google Cloud Storage
 - Object metadata carries the extractor SHA-256 for remote artifact validation
 - Idempotent **Snowflake RAW loader** with per-batch ledger, row-count reconciliation, and fail-closed LOADING guard
@@ -53,7 +55,6 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 
 - dbt Bronze / Silver / Gold transformations
 - Airflow orchestration and scheduling
-- CD deployment pipeline to the production Windows Server
 - Monitoring and alerting
 - Data-quality framework
 - Data lineage and governance
@@ -89,7 +90,7 @@ Python Extraction Service   ◄── Airflow (orchestration, retries, schedulin
 BI / Analytics / ML
 ```
 
-Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Server) span all layers.
+Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → EC2) span all layers.
 
 ---
 
@@ -97,7 +98,7 @@ Observability (logs, metrics, alerts) and CI/CD (GitHub Actions → Windows Serv
 
 - State-level API extraction with `filters[State]` parameter
 - Offset/limit pagination — 10,000 records per request
-- `curl.exe`-based HTTP (Windows-native, no third-party HTTP library)
+- `curl`-based HTTP (cross-platform — Linux and Windows, no third-party HTTP library)
 - Exponential backoff with jitter on failure, up to 5 retries
 - Short-page protection — unexpected truncated responses are retried, not accepted
 - Parallel state processing via `ThreadPoolExecutor`
@@ -132,7 +133,9 @@ Udyam_MSME/
 ├── Readme.md
 ├── .github/
 │   └── workflows/
-│       └── ci.yml            # Automated Windows CI
+│       ├── ci.yml            # Tests on every PR and push
+│       ├── cd.yml            # Auto-deploy to EC2 on merge to main
+│       └── run-pipeline.yml  # Manual extraction + Snowflake load (state dropdown)
 ├── scripts/
 │   ├── load_to_snowflake.py  # Idempotent S3 → Snowflake RAW loader
 │   └── preflight.ps1         # Production host readiness checks
@@ -164,18 +167,18 @@ Udyam_MSME/
 
 ## Requirements
 
-- **Python 3.10+** (Windows)
-- **`curl.exe`** — included in Windows 10/11; verify with `curl.exe --version`
+- **Python 3.10+** (Linux or Windows)
+- **`curl`** — pre-installed on Ubuntu; included in Windows 10/11
 - Dependencies listed in `requirements.txt`
 - Development/test dependencies listed in `requirements-dev.txt`
 
-```powershell
+```bash
 pip install -r requirements.txt
 ```
 
 For development and CI:
 
-```powershell
+```bash
 pip install -r requirements-dev.txt
 ```
 
@@ -187,16 +190,16 @@ pip install -r requirements-dev.txt
 
 **2. Create a `.env` file from the template:**
 
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 ```
 
 Then fill in your values. Never commit `.env` to Git.
 
-**3. Verify `curl.exe` is available:**
+**3. Verify `curl` is available:**
 
-```powershell
-curl.exe --version
+```bash
+curl --version
 ```
 
 ---
@@ -528,22 +531,50 @@ State C  → FAILED         → Restart; recovered batches are validated, remain
 
 ---
 
-## Automated Testing and CI
+## CI / CD
 
-```powershell
+### Continuous Integration (`ci.yml`)
+
+Runs on every PR and push to `main` and `aws-migration-prod`:
+
+```bash
 pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-The repository includes a Windows GitHub Actions workflow at `.github/workflows/ci.yml`.
+### Continuous Deployment (`cd.yml`)
+
+Triggers automatically on every merge to `main`. SSHes into the EC2, pulls latest code, reinstalls dependencies, and runs the test suite to confirm the deploy is healthy.
+
+### Manual Pipeline (`run-pipeline.yml`)
+
+Triggered from **Actions → Run Extraction + Load → Run workflow**. Provides:
+- **State dropdown** — all 36 Indian states or `ALL` for a full run
+- **Run ID input** — leave blank to start a new run, or provide an ID to resume
+
+The extract job runs first; the load job runs after it completes successfully.
+
+> For a full 43M-record run, use `screen` directly on the EC2 rather than the workflow — GitHub Actions jobs time out at 6 hours.
+
+### GitHub Actions secrets required
+
+| Secret | Purpose |
+|---|---|
+| `EC2_HOST` | EC2 public IP |
+| `EC2_USER` | `ubuntu` |
+| `EC2_SSH_KEY` | Private key (`.pem` contents) |
+| `UDYAM_API_KEY` | Udyam API key |
+| `AWS_ACCESS_KEY_ID` | S3 write credentials |
+| `AWS_SECRET_ACCESS_KEY` | S3 write credentials |
+| `SNOWFLAKE_PASSWORD` | Snowflake service user password |
 
 ## Production Host Preflight
 
-```powershell
-.\scripts\preflight.ps1
+```bash
+bash scripts/preflight.ps1
 ```
 
-Verifies Python 3.10+, `curl.exe`, required runtime directories, Python compilation, and `UDYAM_API_KEY`.
+Verifies Python 3.10+, `curl`, required runtime directories, Python compilation, and `UDYAM_API_KEY`.
 
 ## Security
 
@@ -556,6 +587,14 @@ Verifies Python 3.10+, `curl.exe`, required runtime directories, Python compilat
 ---
 
 ## Version History
+
+### 3.1.0 — EC2 deployment and CI/CD pipeline
+
+- **Cross-platform `curl`** — removed `.exe` suffix; extractor now runs on Linux and Windows without code changes
+- **EC2 Linux deployment** — Ubuntu 24.04, t3.micro (unlimited CPU burst), virtualenv, `screen` for long-running full-state extractions
+- **GitHub Actions CD** (`cd.yml`) — auto-deploys to EC2 on merge to `main`; pulls code, reinstalls deps, runs test suite
+- **Manual pipeline workflow** (`run-pipeline.yml`) — `workflow_dispatch` with state dropdown (all 36 states + `ALL`) and optional run ID for resuming; extract and load jobs run sequentially
+- **Test isolation fix** — `test_configuration_defaults` patches `load_dotenv` to prevent `.env` contents (e.g. blank `UDYAM_TEST_STATE` on the EC2) from leaking into the test suite
 
 ### 3.0.0 — AWS migration and Snowflake RAW ingestion
 
