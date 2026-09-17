@@ -1,0 +1,67 @@
+version: 2
+
+models:
+  - name: silver_msme
+    description: "Deduplicated enterprises from Bronze. One row per unique (enterprise_name, state, district, registration_date). Null enterprise_name rows excluded."
+    columns:
+      - name: enterprise_key
+        description: "MD5 surrogate key: enterprise_name|state_code|district_code|registration_date"
+        data_tests:
+          - not_null
+          - unique
+      - name: country
+        description: "ISO 3166-1 alpha-3 country code — always 'IND'"
+        data_tests:
+          - not_null
+      - name: msme
+        description: "Flag indicating this is an MSME record — always 1"
+        data_tests:
+          - not_null
+      - name: state_code
+        description: "Integer state code"
+        data_tests:
+          - not_null
+      - name: state_name
+        description: "State name"
+        data_tests:
+          - not_null
+      - name: enterprise_name
+        description: "Trimmed enterprise name — never null in Silver"
+        data_tests:
+          - not_null
+      - name: registration_date
+        description: "Udyam registration date"
+      - name: ingested_at
+        description: "Snowflake ingestion timestamp (from Raw)"
+        data_tests:
+          - not_null
+      - name: silver_loaded_at
+        description: "Timestamp this row was written to the Silver layer"
+        data_tests:
+          - not_null
+
+  - name: silver_msme_activities
+    description: "Flattened NIC activity codes. One row per (enterprise, NIC code). Sourced from silver_msme.activities VARIANT."
+    columns:
+      - name: activity_key
+        description: "MD5 surrogate key: enterprise_key|nic_code"
+        data_tests:
+          - not_null
+          - unique
+      - name: enterprise_key
+        description: "FK to silver_msme.enterprise_key"
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('silver_msme')
+              field: enterprise_key
+      - name: nic_code
+        description: "5-digit NIC code"
+        data_tests:
+          - not_null
+      - name: nic_description
+        description: "Human-readable NIC activity description"
+      - name: silver_loaded_at
+        description: "Timestamp this row was written to the Silver layer"
+        data_tests:
+          - not_null

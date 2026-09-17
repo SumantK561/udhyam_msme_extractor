@@ -1,0 +1,107 @@
+version: 2
+
+models:
+  - name: dim_geography
+    description: "Distinct state / district / pincode combinations. One row per unique geo combination."
+    columns:
+      - name: geo_key
+        description: "MD5 surrogate key: state_code|district_code|pincode"
+        data_tests:
+          - not_null
+          - unique
+      - name: country
+        description: "ISO 3166-1 alpha-3 country code"
+        data_tests:
+          - not_null
+      - name: state_code
+        description: "Integer state code"
+        data_tests:
+          - not_null
+      - name: state_name
+        description: "State name"
+        data_tests:
+          - not_null
+      - name: district_code
+        description: "Integer district code"
+      - name: district_name
+        description: "District name"
+      - name: pincode
+        description: "6-digit PIN code string"
+
+  - name: dim_nic_code
+    description: "Distinct NIC 5-digit codes and descriptions. One row per NIC code."
+    columns:
+      - name: nic_key
+        description: "MD5 surrogate key of nic_code"
+        data_tests:
+          - not_null
+          - unique
+      - name: nic_code
+        description: "5-digit NIC code"
+        data_tests:
+          - not_null
+          - unique
+      - name: nic_description
+        description: "Human-readable NIC activity description"
+
+  - name: dim_enterprise
+    description: "Enterprise attributes. One row per unique enterprise (sourced from silver_msme)."
+    columns:
+      - name: enterprise_key
+        description: "MD5 surrogate key — FK to fct_registrations"
+        data_tests:
+          - not_null
+          - unique
+      - name: country
+        description: "ISO 3166-1 alpha-3 country code — always 'IND'"
+        data_tests:
+          - not_null
+      - name: msme
+        description: "MSME flag — always 1"
+        data_tests:
+          - not_null
+      - name: enterprise_name
+        description: "Registered enterprise name"
+        data_tests:
+          - not_null
+      - name: registration_date
+        description: "Udyam registration date"
+      - name: communication_address
+        description: "Full communication address"
+
+  - name: fct_registrations
+    description: "One row per enterprise registration. Grain: enterprise. Links enterprise and geography dimensions."
+    columns:
+      - name: registration_key
+        description: "Surrogate key — same as enterprise_key (one registration per enterprise)"
+        data_tests:
+          - not_null
+          - unique
+      - name: enterprise_key
+        description: "FK to dim_enterprise"
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_enterprise')
+              field: enterprise_key
+      - name: geo_key
+        description: "FK to dim_geography"
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_geography')
+              field: geo_key
+      - name: country
+        description: "ISO 3166-1 alpha-3 country code"
+        data_tests:
+          - not_null
+      - name: msme
+        description: "MSME flag"
+        data_tests:
+          - not_null
+      - name: registration_date
+        description: "Udyam registration date"
+      - name: ingested_at
+        description: "Snowflake ingestion timestamp"
+        data_tests:
+          - not_null

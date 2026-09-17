@@ -1,0 +1,26 @@
+name: 'udyam_dbt'
+version: '1.0.0'
+profile: 'udyam_dbt'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  udyam_dbt:
+    bronze:
+      +schema: BRONZE
+      +materialized: incremental
+    silver:
+      +schema: SILVER
+      +materialized: incremental
+    gold:
+      +schema: GOLD
+      +materialized: table
