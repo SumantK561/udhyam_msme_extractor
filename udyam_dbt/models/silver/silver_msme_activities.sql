@@ -29,14 +29,28 @@ flattened AS (
 
     WHERE s.activities IS NOT NULL
 
+),
+
+deduped AS (
+
+    SELECT
+        enterprise_key,
+        nic_code,
+        nic_description
+    FROM flattened
+    WHERE nic_code IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY enterprise_key, nic_code
+        ORDER BY nic_description
+    ) = 1
+
 )
 
 SELECT
-    MD5(enterprise_key || '|' || COALESCE(nic_code, ''))   AS activity_key,
+    MD5(enterprise_key || '|' || nic_code)  AS activity_key,
     enterprise_key,
     nic_code,
     nic_description,
-    CURRENT_TIMESTAMP()                                     AS silver_loaded_at
+    CURRENT_TIMESTAMP()                     AS silver_loaded_at
 
-FROM flattened
-WHERE nic_code IS NOT NULL
+FROM deduped
