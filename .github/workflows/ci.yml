@@ -32,7 +32,14 @@ jobs:
         run: python -m pytest -q
 
       - name: Validate dbt project
-        working-directory: udyam_dbt
         run: |
           pip install "dbt-snowflake>=1.12" --quiet
-          dbt parse --profiles-dir .
+          python -c "
+          import os, pathlib
+          p = pathlib.Path.home() / '.dbt'
+          p.mkdir(exist_ok=True)
+          (p / 'profiles.yml').write_text(
+              'udyam_dbt:\n  target: ci\n  outputs:\n    ci:\n      type: snowflake\n      account: dummy\n      user: dummy\n      password: dummy\n      role: dummy\n      warehouse: dummy\n      database: UDYAM\n      schema: RAW\n      threads: 1\n'
+          )
+          "
+          cd udyam_dbt && dbt parse

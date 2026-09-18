@@ -24,7 +24,8 @@ models:
         description: "Trimmed enterprise name"
         data_tests:
           - not_null:
-              severity: warn
+              config:
+                severity: warn
       - name: communication_address
         description: "Trimmed communication address"
       - name: activities

@@ -53,8 +53,9 @@ models:
         data_tests:
           - not_null
           - relationships:
-              to: ref('silver_msme')
-              field: enterprise_key
+              arguments:
+                to: ref('silver_msme')
+                field: enterprise_key
       - name: nic_code
         description: "5-digit NIC code"
         data_tests:
