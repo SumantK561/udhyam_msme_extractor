@@ -30,3 +30,9 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q
+
+      - name: Validate dbt project
+        working-directory: udyam_dbt
+        run: |
+          pip install "dbt-snowflake>=1.12" --quiet
+          dbt parse --profiles-dir .
