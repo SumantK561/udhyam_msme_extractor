@@ -97,7 +97,7 @@ def reconcile_run(results, logger) -> bool:
     expected = sum(int(r.get("total_records") or 0) for r in results)
     actual = sum(int(r.get("records_written") or 0) for r in results)
 
-    if expected != actual:
+    if actual < expected:
         logger.error(
             "RUN RECONCILIATION FAILED | Reason=RecordCountMismatch | "
             "ExpectedRecords=%s | ActualRecords=%s | Difference=%s",
@@ -107,13 +107,26 @@ def reconcile_run(results, logger) -> bool:
         )
         return False
 
-    logger.info(
-        "RUN RECONCILIATION PASSED | States=%s | "
-        "ExpectedRecords=%s | ActualRecords=%s",
-        len(results),
-        expected,
-        actual,
-    )
+    if actual > expected:
+        # New registrations arrived at the API during the extraction window.
+        # All available records were fetched per state -- treat as a warning.
+        logger.warning(
+            "RUN RECONCILIATION PASSED WITH GROWTH | States=%s | "
+            "ExpectedRecords=%s | ActualRecords=%s | "
+            "NewRegistrationsDuringExtraction=%s",
+            len(results),
+            expected,
+            actual,
+            actual - expected,
+        )
+    else:
+        logger.info(
+            "RUN RECONCILIATION PASSED | States=%s | "
+            "ExpectedRecords=%s | ActualRecords=%s",
+            len(results),
+            expected,
+            actual,
+        )
     return True
 
 
