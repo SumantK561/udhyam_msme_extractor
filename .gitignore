@@ -1,29 +1,41 @@
-# Environment
-.env
-
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Output data
-output/
-
-# Execution checkpoints
-checkpoints/
-
-# Logs
-logs/
-
-# Virtual environment
-venv/
+# Virtual environments
 .venv/
+venv/
 env/
 
-# IDE
-.vscode/
-.idea/
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Frontend environment / secrets
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Backups
+*.backup
+*.bak
+
+# Frontend dependencies and build
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Logs
+*.log
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Temporary inspection files
+repository_scan.txt

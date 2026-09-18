@@ -23,7 +23,11 @@ class LocalStorage:
     ) -> str:
         return str(local_path)
 
-    def validate_artifact(self, manifest_record: dict, checksum_fn) -> tuple[bool, str]:
+    def validate_artifact(
+        self,
+        manifest_record: dict,
+        checksum_fn,
+    ) -> tuple[bool, str]:
         batch_file = manifest_record.get("batch_file")
         expected_checksum = manifest_record.get("checksum")
 
@@ -70,22 +74,12 @@ class GCSStorage:
         except ImportError as exc:
             raise StorageError(
                 "google-cloud-storage is required for "
-                "UDYAM_STORAGE_BACKEND=gcs"
+                "STORAGE_PROVIDER=gcs"
             ) from exc
 
         self.bucket_name = bucket_name
         self.prefix = prefix.strip("/")
 
-        # ------------------------------------------------------------------
-        # POC-ONLY authentication override.
-        #
-        # If UDYAM_GCS_ACCESS_TOKEN is present, use the explicitly supplied
-        # OAuth access token. This is intended only for the current POC.
-        #
-        # Production should NOT use an access token in the environment.
-        # Production authentication should use ADC / service account /
-        # workload identity.
-        # ------------------------------------------------------------------
         access_token = os.getenv("UDYAM_GCS_ACCESS_TOKEN")
 
         if access_token:
@@ -106,7 +100,6 @@ class GCSStorage:
             )
 
         else:
-            # Normal production/default authentication path.
             self.client = (
                 storage.Client(project=project)
                 if project
@@ -154,9 +147,7 @@ class GCSStorage:
 
         blob = self.bucket.blob(object_name)
 
-        blob.metadata = {
-            "sha256": checksum,
-        }
+        blob.metadata = {"sha256": checksum}
 
         try:
             with local_path.open("rb") as file:
@@ -174,10 +165,6 @@ class GCSStorage:
                 f"GCS upload failed for {self._uri(object_name)}: {exc}"
             ) from exc
 
-        # ------------------------------------------------------------------
-        # Verify that the uploaded object exists and that its metadata
-        # contains the expected checksum.
-        # ------------------------------------------------------------------
         if blob.size is None or blob.size <= 0:
             raise StorageError(
                 f"GCS upload verification failed: empty object "
@@ -226,7 +213,6 @@ class GCSStorage:
 
         try:
             blob.reload()
-
         except Exception:
             return False, "GCSObjectNotFound"
 
@@ -302,14 +288,252 @@ class GCSStorage:
         )
 
 
+class S3Storage:
+    """Publish RAW artifacts directly to Amazon S3."""
+
+    def __init__(
+        self,
+        bucket_name: str,
+        prefix: str = "udyam/raw",
+        region: Optional[str] = None,
+    ):
+        try:
+            import boto3
+        except ImportError as exc:
+            raise StorageError(
+                "boto3 is required for STORAGE_PROVIDER=aws"
+            ) from exc
+
+        self.bucket_name = bucket_name
+        self.prefix = prefix.strip("/")
+
+        try:
+            self.client = boto3.client(
+                "s3",
+                region_name=region,
+            )
+        except Exception as exc:
+            raise StorageError(
+                f"Failed to initialize S3 client: {exc}"
+            ) from exc
+
+    def _object_name(
+        self,
+        run_id: str,
+        state: str,
+        filename: str,
+        *,
+        batch: bool = False,
+    ) -> str:
+        run_root = (
+            f"{self.prefix}/run_id={run_id}"
+            if self.prefix
+            else f"run_id={run_id}"
+        )
+
+        if batch:
+            return f"{run_root}/state={state}/batches/{filename}"
+
+        return f"{run_root}/{filename}"
+
+    def _uri(self, object_name: str) -> str:
+        return f"s3://{self.bucket_name}/{object_name}"
+
+    def publish_batch(
+        self,
+        local_path: Path,
+        run_id: str,
+        state: str,
+        offset: int,
+        checksum: str,
+    ) -> str:
+        object_name = self._object_name(
+            run_id,
+            state,
+            local_path.name,
+            batch=True,
+        )
+
+        try:
+            with local_path.open("rb") as file:
+                self.client.upload_fileobj(
+                    file,
+                    self.bucket_name,
+                    object_name,
+                    ExtraArgs={
+                        "Metadata": {
+                            "sha256": checksum,
+                        },
+                    },
+                )
+
+        except Exception as exc:
+            raise StorageError(
+                f"S3 upload failed for {self._uri(object_name)}: {exc}"
+            ) from exc
+
+        try:
+            response = self.client.head_object(
+                Bucket=self.bucket_name,
+                Key=object_name,
+            )
+        except Exception as exc:
+            raise StorageError(
+                f"S3 upload verification failed for "
+                f"{self._uri(object_name)}: {exc}"
+            ) from exc
+
+        if response.get("ContentLength", 0) <= 0:
+            raise StorageError(
+                f"S3 upload verification failed: empty object "
+                f"{self._uri(object_name)}"
+            )
+
+        metadata = response.get("Metadata") or {}
+        remote_checksum = metadata.get("sha256")
+
+        if remote_checksum != checksum:
+            raise StorageError(
+                f"S3 checksum metadata mismatch for "
+                f"{self._uri(object_name)}: "
+                f"expected={checksum}, actual={remote_checksum}"
+            )
+
+        return self._uri(object_name)
+
+    def validate_artifact(
+        self,
+        manifest_record: dict,
+        checksum_fn,
+    ) -> tuple[bool, str]:
+        batch_file = manifest_record.get("batch_file")
+        expected_checksum = manifest_record.get("checksum")
+
+        if not batch_file:
+            return False, "MissingBatchFile"
+
+        if not expected_checksum:
+            return False, "MissingChecksum"
+
+        parsed = urlparse(batch_file)
+
+        if parsed.scheme != "s3":
+            return False, "InvalidS3Uri"
+
+        if parsed.netloc != self.bucket_name:
+            return False, "UnexpectedS3Bucket"
+
+        object_name = parsed.path.lstrip("/")
+
+        if not object_name:
+            return False, "MissingS3Object"
+
+        try:
+            response = self.client.head_object(
+                Bucket=self.bucket_name,
+                Key=object_name,
+            )
+        except Exception:
+            return False, "S3ObjectNotFound"
+
+        if response.get("ContentLength", 0) <= 0:
+            return False, "S3ObjectEmpty"
+
+        remote_checksum = (
+            response.get("Metadata") or {}
+        ).get("sha256")
+
+        if remote_checksum != expected_checksum:
+            return False, "ChecksumMismatch"
+
+        return True, ""
+
+    def _upload_metadata_file(
+        self,
+        local_path: Path,
+        object_name: str,
+        content_type: str,
+    ) -> None:
+        try:
+            with local_path.open("rb") as file:
+                self.client.upload_fileobj(
+                    file,
+                    self.bucket_name,
+                    object_name,
+                    ExtraArgs={
+                        "ContentType": content_type,
+                    },
+                )
+
+        except Exception as exc:
+            raise StorageError(
+                f"S3 metadata upload failed for "
+                f"{self._uri(object_name)}: {exc}"
+            ) from exc
+
+        try:
+            response = self.client.head_object(
+                Bucket=self.bucket_name,
+                Key=object_name,
+            )
+        except Exception as exc:
+            raise StorageError(
+                f"S3 metadata upload verification failed for "
+                f"{self._uri(object_name)}: {exc}"
+            ) from exc
+
+        if response.get("ContentLength", 0) <= 0:
+            raise StorageError(
+                f"S3 metadata upload verification failed: "
+                f"empty object {self._uri(object_name)}"
+            )
+
+    def sync_manifest(
+        self,
+        run_id: str,
+        local_path: Path,
+    ) -> None:
+        self._upload_metadata_file(
+            local_path,
+            self._object_name(
+                run_id,
+                "",
+                local_path.name,
+            ),
+            "application/x-ndjson",
+        )
+
+    def sync_run_summary(
+        self,
+        run_id: str,
+        local_path: Path,
+    ) -> None:
+        self._upload_metadata_file(
+            local_path,
+            self._object_name(
+                run_id,
+                "",
+                local_path.name,
+            ),
+            "application/json",
+        )
+
+
 def build_storage(settings):
     """Build the configured RAW storage backend."""
 
-    if settings.storage_backend == "gcs":
+    if settings.storage_provider == "gcs":
         return GCSStorage(
             bucket_name=settings.gcs_bucket,
             prefix=settings.gcs_prefix,
             project=settings.gcs_project,
+        )
+
+    if settings.storage_provider == "aws":
+        return S3Storage(
+            bucket_name=settings.aws_s3_bucket,
+            prefix=settings.aws_s3_prefix,
+            region=settings.aws_region,
         )
 
     return LocalStorage()
