@@ -196,7 +196,7 @@ def reconcile_state(
     expected = int(total_records)
     actual = int(records_written)
 
-    if expected != actual:
+    if actual < expected:
         logger.error(
             "RECONCILIATION FAILED | "
             "State=%s | "
@@ -209,6 +209,21 @@ def reconcile_state(
             actual - expected,
         )
         return False
+
+    if actual > expected:
+        # API total count increased during extraction (new registrations).
+        # All available records were fetched — treat as a warning, not failure.
+        logger.warning(
+            "RECONCILIATION PASSED WITH GROWTH | "
+            "State=%s | "
+            "ExpectedRecords=%s | "
+            "ActualRecords=%s | "
+            "NewRegistrationsDuringExtraction=%s",
+            state,
+            expected,
+            actual,
+            actual - expected,
+        )
 
     logger.info(
         "RECONCILIATION PASSED | "
