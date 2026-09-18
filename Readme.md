@@ -187,6 +187,7 @@ Udyam_MSME/
 
 - **Python 3.10+** (Linux or Windows)
 - **`curl`** — pre-installed on Ubuntu; included in Windows 10/11
+- **dbt-snowflake 1.12+** — for running the transformation layer
 - Dependencies listed in `requirements.txt`
 - Development/test dependencies listed in `requirements-dev.txt`
 
@@ -218,6 +219,33 @@ Then fill in your values. Never commit `.env` to Git.
 
 ```bash
 curl --version
+```
+
+**4. Create the dbt profiles file** (`~/.dbt/profiles.yml`):
+
+```yaml
+udyam_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: <SNOWFLAKE_ACCOUNT>
+      user: <SNOWFLAKE_USER>
+      password: <SNOWFLAKE_PASSWORD>
+      role: UDYAM_LOADER
+      warehouse: UDYAM_WH
+      database: UDYAM
+      schema: RAW
+      threads: 4
+```
+
+Values map directly to the `SNOWFLAKE_*` variables in `.env`. The `schema` field is the dbt default; each model overrides it to `DBT_BRONZE`, `DBT_SILVER`, or `DBT_GOLD`.
+
+**5. Verify the dbt connection:**
+
+```bash
+cd udyam_dbt
+dbt debug
 ```
 
 ---
@@ -559,7 +587,7 @@ The `udyam_dbt/` project transforms raw MSME data through three Snowflake schema
 |---|---|---|
 | `bronze_msme` | One row per raw batch record | Incremental merge on `(batch_id, source_offset)` |
 
-Casts raw VARCHAR columns to typed values (`state_code` → INTEGER, `pincode` → zero-padded VARCHAR, `registration_date` → DATE, `activities` → VARIANT). Null `enterprise_name` rows are preserved and surfaced as a warning test.
+Casts raw VARCHAR columns to typed values — `state_code` / `district_code` → INTEGER, `pincode` → zero-padded 6-char VARCHAR, `registration_date` → DATE, `activities` → VARIANT via `TRY_PARSE_JSON`. All 14 source columns plus `bronze_loaded_at` are preserved. Null `enterprise_name` rows are kept and surface as a `warn`-severity test (2 records identified in Andaman data).
 
 ### Silver — `UDYAM.DBT_SILVER`
 
@@ -568,9 +596,9 @@ Casts raw VARCHAR columns to typed values (`state_code` → INTEGER, `pincode` �
 | `silver_msme` | One row per unique enterprise | Incremental merge on `enterprise_key` (MD5) |
 | `silver_msme_activities` | One row per enterprise × NIC code | Incremental merge on `activity_key` (MD5) |
 
-`silver_msme` deduplicates by `(enterprise_name, state_code, district_code, registration_date)`, keeps the latest record, adds `country = 'IND'` and `msme = 1` flags, and excludes null `enterprise_name` rows.
+`silver_msme` deduplicates Bronze by `(enterprise_name, state_code, district_code, registration_date)` keeping the latest ingestion, adds `country = 'IND'` and `msme = 1` flags, and excludes null `enterprise_name` rows.
 
-`silver_msme_activities` lateral-flattens the `activities` VARIANT into one row per NIC 5-digit code with its description.
+`silver_msme_activities` lateral-flattens the `activities` VARIANT (keys: `NIC5DigitId`, `Description`) into one row per enterprise × NIC 5-digit code.
 
 ### Gold — `UDYAM.DBT_GOLD`
 
@@ -581,7 +609,7 @@ Casts raw VARCHAR columns to typed values (`state_code` → INTEGER, `pincode` �
 | `dim_enterprise` | One row per enterprise | Full table rebuild |
 | `fct_registrations` | One row per enterprise registration | Full table rebuild |
 
-All surrogate keys are MD5 hashes. `fct_registrations` links `enterprise_key` → `dim_enterprise` and `geo_key` → `dim_geography`. Foreign-key relationship tests are enforced in `schema.yml`.
+All surrogate keys are MD5 hashes. `fct_registrations` joins `silver_msme` to `dim_geography` on `(state_code, district_code, pincode)` and carries FKs to both `dim_enterprise` and `dim_geography`. Foreign-key relationship tests are enforced in `schema.yml` (45 data tests total across all layers).
 
 ### Running dbt
 
