@@ -51,10 +51,10 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Snowflake connected to S3 via Storage Integration (no long-lived AWS keys in Snowflake)
 - Least-privilege IAM policy for the extractor service account (`s3:PutObject`, `s3:GetObject` scoped to prefix)
 - **dbt Bronze / Silver / Gold transformation layer** with 7 models, 45 data tests, and MD5 surrogate keys
+- **Airflow orchestration** — weekly incremental DAG + manual full-refresh DAG; systemd-managed scheduler and webserver on EC2
 
 ### Planned
 
-- Airflow orchestration and scheduling
 - Monitoring and alerting
 - Data-quality framework
 - Data lineage and governance
@@ -136,8 +136,12 @@ Udyam_MSME/
 │       ├── ci.yml            # Tests on every PR and push
 │       ├── cd.yml            # Auto-deploy to EC2 on merge to main
 │       └── run-pipeline.yml  # Manual extraction + Snowflake load (state dropdown)
+├── dags/
+│   ├── udyam_incremental_pipeline.py   # Weekly incremental DAG (extract → load → dbt run)
+│   └── udyam_full_refresh_pipeline.py  # Manual full-refresh DAG (extract → load → dbt run --full-refresh)
 ├── scripts/
 │   ├── load_to_snowflake.py  # Idempotent S3 → Snowflake RAW loader
+│   ├── setup_airflow.sh      # One-shot Airflow install + systemd setup for EC2
 │   └── preflight.ps1         # Production host readiness checks
 ├── snowflake/
 │   ├── part 1.sql            # Role, user, database, schema, tables, file formats
@@ -624,6 +628,53 @@ dbt test
 
 # Full refresh (re-create all incremental models from scratch)
 dbt run --full-refresh
+```
+
+---
+
+## Airflow Orchestration
+
+Two DAGs live in `dags/`. Airflow runs in a dedicated virtualenv (`~/airflow-venv`) on the same EC2 instance as the extractor, managed by systemd.
+
+### DAGs
+
+| DAG | Schedule | Purpose |
+|---|---|---|
+| `udyam_incremental_pipeline` | Weekly (Sunday midnight UTC) | Extract new records → load → `dbt run` |
+| `udyam_full_refresh_pipeline` | Manual only | Extract all 36 states → load → `dbt run --full-refresh` |
+
+Both DAGs share the same three-task structure:
+
+```
+extract → load_to_snowflake → dbt_run
+```
+
+Each task calls the same scripts already in the repo using `BashOperator`.
+
+### Setup (one-time, on EC2)
+
+```bash
+bash scripts/setup_airflow.sh
+```
+
+This installs Airflow 2.10.3 into `~/airflow-venv`, initialises the SQLite metadata DB, writes systemd units for the scheduler and webserver, enables them on boot, and prompts for an admin user. The `dags_folder` is pointed at `~/udhyam_msme_extractor/dags/` via the `AIRFLOW__CORE__DAGS_FOLDER` environment variable.
+
+**Open port 8080** in the EC2 security group to access the Airflow UI at `http://<EC2-PUBLIC-IP>:8080`.
+
+### Useful commands
+
+```bash
+# Service status
+sudo systemctl status airflow-scheduler
+sudo systemctl status airflow-webserver
+
+# Live logs
+sudo journalctl -u airflow-scheduler -f
+sudo journalctl -u airflow-webserver -f
+
+# Trigger full-refresh manually (CLI)
+source ~/airflow-venv/bin/activate
+airflow dags trigger udyam_full_refresh_pipeline
 ```
 
 ---
