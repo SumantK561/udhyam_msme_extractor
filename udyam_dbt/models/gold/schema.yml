@@ -82,15 +82,17 @@ models:
         data_tests:
           - not_null
           - relationships:
-              to: ref('dim_enterprise')
-              field: enterprise_key
+              arguments:
+                to: ref('dim_enterprise')
+                field: enterprise_key
       - name: geo_key
         description: "FK to dim_geography"
         data_tests:
           - not_null
           - relationships:
-              to: ref('dim_geography')
-              field: geo_key
+              arguments:
+                to: ref('dim_geography')
+                field: geo_key
       - name: country
         description: "ISO 3166-1 alpha-3 country code"
         data_tests:
