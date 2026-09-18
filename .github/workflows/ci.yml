@@ -30,3 +30,7 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q
+
+      - name: Validate dbt project
+        working-directory: udyam_dbt
+        run: dbt parse --profiles-dir .

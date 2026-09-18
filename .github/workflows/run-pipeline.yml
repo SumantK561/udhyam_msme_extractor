@@ -1,4 +1,4 @@
-name: Run Extraction + Load
+name: Run Extraction + Load + Transform
 
 on:
   workflow_dispatch:
@@ -111,3 +111,21 @@ jobs:
             echo "Loading run_id=$RUN_ID"
 
             python3 scripts/load_to_snowflake.py
+
+  transform:
+    name: Transform → dbt Bronze / Silver / Gold
+    runs-on: ubuntu-latest
+    needs: load
+
+    steps:
+      - name: Run dbt on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 30m
+          script: |
+            cd ~/udhyam_msme_extractor/udyam_dbt
+            source ../.venv/bin/activate
+            dbt run
