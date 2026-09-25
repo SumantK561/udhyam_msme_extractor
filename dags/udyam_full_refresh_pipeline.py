@@ -37,14 +37,14 @@ with DAG(
         bash_command=(
             f"source {VENV} && "
             f"cd {PROJECT_DIR} && "
-            "python3 run_udyam.py && "
             "python3 -c \""
-            "import json, glob, os; "
-            "latest = max(glob.glob('output/*/run_summary.json'), key=os.path.getmtime); "
-            "run_id = json.load(open(latest))['run_id']; "
-            "open('/tmp/udyam_run_id.txt', 'w').write(run_id); "
-            "print('RUN_ID written:', run_id)"
-            "\""
+            "from udyam_extractor import get_run_id; "
+            "rid = get_run_id(); "
+            "open('/tmp/udyam_run_id.txt', 'w').write(rid); "
+            "print('RUN_ID:', rid)"
+            "\" && "
+            "export UDYAM_RUN_ID=$(cat /tmp/udyam_run_id.txt) && "
+            "python3 run_udyam.py"
         ),
         execution_timeout=timedelta(hours=12),
     )
