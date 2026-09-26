@@ -60,7 +60,13 @@ sudo systemctl enable udyam-webapp
 sudo systemctl restart udyam-webapp
 echo "==> udyam-webapp systemd service installed and started"
 
-# 4. nginx
+# 4. nginx needs traversal permission through $HOME to reach the frontend
+#    files -- Ubuntu's default ~ permissions (750) block the www-data user.
+chmod o+x "$HOME"
+chmod o+x "$PROJECT_DIR"
+chmod o+x "$WEBAPP_DIR"
+chmod o+x "$WEBAPP_DIR/frontend"
+
 if ! command -v nginx >/dev/null 2>&1; then
     echo "==> Installing nginx..."
     sudo apt-get update -qq
