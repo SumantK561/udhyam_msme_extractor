@@ -28,8 +28,11 @@ const els = {
   modal: document.getElementById("detail-modal"),
   closeModal: document.getElementById("close-modal"),
   detailName: document.getElementById("detail-name"),
+  detailMsmeBadge: document.getElementById("detail-msme-badge"),
   detailAddress: document.getElementById("detail-address"),
-  detailLocation: document.getElementById("detail-location"),
+  detailState: document.getElementById("detail-state"),
+  detailDistrict: document.getElementById("detail-district"),
+  detailCountry: document.getElementById("detail-country"),
   detailRegistration: document.getElementById("detail-registration"),
   detailActivities: document.getElementById("detail-activities"),
 };
@@ -203,11 +206,28 @@ async function showDetail(enterpriseKey) {
   const d = await res.json();
 
   els.detailName.textContent = d.enterprise_name;
-  els.detailAddress.textContent = d.communication_address || "";
-  els.detailLocation.textContent = [d.district_name, d.state_name, d.pincode].filter(Boolean).join(", ");
-  els.detailRegistration.textContent = d.registration_date ? `Registered: ${d.registration_date}` : "";
+
+  if (d.msme) {
+    els.detailMsmeBadge.classList.remove("hidden");
+  } else {
+    els.detailMsmeBadge.classList.add("hidden");
+  }
+
+  els.detailAddress.textContent = d.communication_address || "—";
+  els.detailState.textContent = d.state_name || "—";
+  els.detailDistrict.textContent = d.district_name
+    ? d.pincode ? `${d.district_name} (${d.pincode})` : d.district_name
+    : "—";
+  els.detailCountry.textContent = d.country || "—";
+  els.detailRegistration.textContent = d.registration_date || "—";
 
   els.detailActivities.innerHTML = "";
+  if (d.activities.length === 0) {
+    const li = document.createElement("li");
+    li.className = "no-activities";
+    li.textContent = "No NIC activities on record.";
+    els.detailActivities.appendChild(li);
+  }
   for (const a of d.activities) {
     const li = document.createElement("li");
     li.textContent = a.nic_description ? `${a.nic_code} — ${a.nic_description}` : a.nic_code;

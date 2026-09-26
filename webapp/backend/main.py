@@ -52,6 +52,8 @@ class Enterprise(BaseModel):
     state_name: Optional[str] = None
     district_name: Optional[str] = None
     pincode: Optional[str] = None
+    country: Optional[str] = None
+    msme: Optional[int] = None
     registration_date: Optional[str] = None
 
 
@@ -299,7 +301,7 @@ def get_enterprise(enterprise_key: str):
     rows = _run_query(
         """
         SELECT enterprise_key, enterprise_name, communication_address,
-               state_name, district_name, pincode, registration_date
+               state_name, district_name, pincode, country, msme, registration_date
         FROM DIM_ENTERPRISE
         WHERE enterprise_key = %(key)s
         """,
@@ -322,6 +324,8 @@ def get_enterprise(enterprise_key: str):
         state_name=r[3],
         district_name=r[4],
         pincode=r[5],
-        registration_date=str(r[6]) if r[6] else None,
+        country=r[6],
+        msme=r[7],
+        registration_date=str(r[8]) if r[8] else None,
         activities=[NicCode(nic_code=a[0], nic_description=a[1]) for a in activities],
     )

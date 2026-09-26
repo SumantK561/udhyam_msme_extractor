@@ -114,10 +114,35 @@
   <div id="detail-modal" class="modal hidden">
     <div class="modal-content">
       <button id="close-modal" class="close-btn">&times;</button>
-      <h2 id="detail-name"></h2>
-      <p id="detail-address"></p>
-      <p id="detail-location"></p>
-      <p id="detail-registration"></p>
+
+      <div class="detail-header">
+        <h2 id="detail-name"></h2>
+        <span id="detail-msme-badge" class="badge hidden">MSME</span>
+      </div>
+
+      <dl class="detail-grid">
+        <div class="detail-item detail-item-wide">
+          <dt>Address</dt>
+          <dd id="detail-address">—</dd>
+        </div>
+        <div class="detail-item">
+          <dt>State</dt>
+          <dd id="detail-state">—</dd>
+        </div>
+        <div class="detail-item">
+          <dt>District</dt>
+          <dd id="detail-district">—</dd>
+        </div>
+        <div class="detail-item">
+          <dt>Country</dt>
+          <dd id="detail-country">—</dd>
+        </div>
+        <div class="detail-item">
+          <dt>Registered On</dt>
+          <dd id="detail-registration">—</dd>
+        </div>
+      </dl>
+
       <h3>NIC Activities</h3>
       <ul id="detail-activities"></ul>
     </div>
