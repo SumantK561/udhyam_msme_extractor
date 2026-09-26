@@ -52,6 +52,7 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Least-privilege IAM policy for the extractor service account (`s3:PutObject`, `s3:GetObject` scoped to prefix)
 - **dbt Bronze / Silver / Gold transformation layer** with 7 models, 45 data tests, and MD5 surrogate keys
 - **Airflow orchestration** — weekly incremental DAG + manual full-refresh DAG; systemd-managed scheduler and webserver on EC2
+- **Public MSME search webapp** — FastAPI + static frontend over the Gold star schema, dedicated read-only Snowflake role and warehouse, nginx + Let's Encrypt
 
 ### Planned
 
@@ -139,9 +140,25 @@ Udyam_MSME/
 ├── dags/
 │   ├── udyam_incremental_pipeline.py   # Weekly incremental DAG (extract → load → dbt run)
 │   └── udyam_full_refresh_pipeline.py  # Manual full-refresh DAG (extract → load → dbt run --full-refresh)
+├── webapp/
+│   ├── backend/
+│   │   ├── main.py                # FastAPI app — search, meta lookups, enterprise detail
+│   │   ├── snowflake_client.py     # Pooled read-only Snowflake connections
+│   │   ├── cache.py                # In-process TTL cache for lookup data
+│   │   ├── requirements.txt
+│   │   └── .env.example
+│   ├── frontend/
+│   │   ├── index.html
+│   │   ├── style.css
+│   │   └── app.js
+│   └── deploy/
+│       ├── udyam-webapp.service    # systemd unit for uvicorn
+│       ├── msme-ratelimit.conf     # nginx rate-limit zone
+│       └── msme.sumantk.in.conf    # nginx site config
 ├── scripts/
 │   ├── load_to_snowflake.py  # Idempotent S3 → Snowflake RAW loader
 │   ├── setup_airflow.sh      # One-shot Airflow install + systemd setup for EC2
+│   ├── setup_webapp.sh       # One-shot public webapp install + nginx + SSL setup for EC2
 │   └── preflight.ps1         # Production host readiness checks
 ├── snowflake/
 │   ├── part 1.sql            # Role, user, database, schema, tables, file formats
@@ -675,6 +692,62 @@ sudo journalctl -u airflow-webserver -f
 # Trigger full-refresh manually (CLI)
 source ~/airflow-venv/bin/activate
 airflow dags trigger udyam_full_refresh_pipeline
+```
+
+---
+
+## Public MSME Search Webapp
+
+A public, read-only search UI over the Gold star schema at `webapp/`.
+
+### Architecture
+
+```
+Browser
+   │
+   ▼
+nginx (msme.sumantk.in, TLS via Let's Encrypt, rate-limited)
+   ├── /             → static frontend (webapp/frontend/)
+   └── /api/         → FastAPI backend (127.0.0.1:8000)
+                             │
+                             ▼
+                    UDYAM_PUBLIC_READER role
+                    UDYAM_PUBLIC_WH warehouse (dedicated, XSMALL)
+                             │
+                             ▼
+                    UDYAM.RAW_GOLD schema only
+```
+
+The public role and warehouse (`snowflake/part 4.sql`) are fully isolated from the ETL pipeline's `UDYAM_LOADER` role and `UDYAM_WH` warehouse — public traffic cannot read RAW/BRONZE/SILVER and cannot inflate ETL compute cost.
+
+### Search
+
+Search requires at least one of: enterprise name (min 2 characters), state, district, or NIC code — this bounds query cost against a 37M+ row table. Pagination uses a `LIMIT page_size + 1` trick to detect a next page without a `COUNT(*)` scan. State/district/NIC lookups are cached in-process for 6 hours since they change only when new dbt runs complete.
+
+`bridge_enterprise_activity` (a new Gold model) joins enterprises to NIC codes, so NIC-based search never needs Silver-schema access.
+
+### Setup (one-time, on EC2)
+
+```bash
+# 1. Create the public role, warehouse, and service user
+#    (run in Snowflake as ACCOUNTADMIN or equivalent)
+#    snowflake/part 4.sql
+
+# 2. Materialize the new bridge_enterprise_activity Gold model
+cd udyam_dbt && dbt run --select bridge_enterprise_activity
+
+# 3. Point msme.sumantk.in's DNS A record at this EC2's public IP (Hostinger)
+
+# 4. Install + start everything (backend, nginx, SSL)
+bash scripts/setup_webapp.sh msme.sumantk.in
+```
+
+### Useful commands
+
+```bash
+sudo systemctl status udyam-webapp
+sudo journalctl -u udyam-webapp -f
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ---
