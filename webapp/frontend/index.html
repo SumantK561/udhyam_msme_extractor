@@ -8,61 +8,90 @@
 </head>
 <body>
   <header>
-    <h1>Udyam MSME Directory</h1>
-    <p class="subtitle">Search 37M+ registered MSME enterprises across India</p>
+    <div class="header-inner">
+      <h1>Udyam MSME Directory</h1>
+      <p class="subtitle">Search and explore 37M+ registered MSME enterprises across India</p>
+    </div>
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="search">Search</button>
+      <button class="tab-btn" data-tab="analytics">Analytics</button>
+    </nav>
   </header>
 
   <main>
-    <form id="search-form">
-      <div class="field">
-        <label for="name">Enterprise name</label>
-        <input type="text" id="name" placeholder="e.g. Sri Ram Traders" minlength="2" />
+    <!-- Search tab -->
+    <section id="tab-search" class="tab-panel">
+      <form id="search-form" class="card">
+        <div class="field">
+          <label for="name">Enterprise name</label>
+          <input type="text" id="name" placeholder="e.g. Sri Ram Traders" minlength="2" />
+        </div>
+
+        <div class="field">
+          <label for="state">State</label>
+          <select id="state">
+            <option value="">All states</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="district">District</label>
+          <select id="district" disabled>
+            <option value="">All districts</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="nic_code">Industry (NIC code)</label>
+          <select id="nic_code">
+            <option value="">All industries</option>
+          </select>
+        </div>
+
+        <button type="submit">Search</button>
+      </form>
+
+      <p id="status" class="status"></p>
+
+      <table id="results-table" class="hidden">
+        <thead>
+          <tr>
+            <th>Enterprise Name</th>
+            <th>State</th>
+            <th>District</th>
+            <th>Pincode</th>
+            <th>Registration Date</th>
+          </tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+
+      <div id="pagination" class="pagination hidden">
+        <button id="prev-page">&larr; Previous</button>
+        <span id="page-label">Page 1</span>
+        <button id="next-page">Next &rarr;</button>
+      </div>
+    </section>
+
+    <!-- Analytics tab -->
+    <section id="tab-analytics" class="tab-panel hidden">
+      <div id="stat-tiles" class="stat-tiles"></div>
+
+      <div class="card chart-card">
+        <h2>Top 10 states by registered enterprises</h2>
+        <div id="chart-by-state" class="chart-container"></div>
       </div>
 
-      <div class="field">
-        <label for="state">State</label>
-        <select id="state">
-          <option value="">All states</option>
-        </select>
+      <div class="card chart-card">
+        <h2>Top 10 industries (NIC code) by registered enterprises</h2>
+        <div id="chart-by-industry" class="chart-container"></div>
       </div>
 
-      <div class="field">
-        <label for="district">District</label>
-        <select id="district" disabled>
-          <option value="">All districts</option>
-        </select>
+      <div class="card chart-card">
+        <h2>Registrations by year</h2>
+        <div id="chart-by-year" class="chart-container"></div>
       </div>
-
-      <div class="field">
-        <label for="nic_code">Industry (NIC code)</label>
-        <select id="nic_code">
-          <option value="">All industries</option>
-        </select>
-      </div>
-
-      <button type="submit">Search</button>
-    </form>
-
-    <p id="status" class="status"></p>
-
-    <table id="results-table" class="hidden">
-      <thead>
-        <tr>
-          <th>Enterprise Name</th>
-          <th>State</th>
-          <th>District</th>
-          <th>Pincode</th>
-          <th>Registration Date</th>
-        </tr>
-      </thead>
-      <tbody id="results-body"></tbody>
-    </table>
-
-    <div id="pagination" class="pagination hidden">
-      <button id="prev-page">&larr; Previous</button>
-      <span id="page-label">Page 1</span>
-      <button id="next-page">Next &rarr;</button>
-    </div>
+    </section>
   </main>
 
   <div id="detail-modal" class="modal hidden">
@@ -82,5 +111,6 @@
   </footer>
 
   <script src="app.js"></script>
+  <script src="analytics.js"></script>
 </body>
 </html>

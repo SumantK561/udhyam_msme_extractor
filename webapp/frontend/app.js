@@ -200,3 +200,25 @@ els.modal.addEventListener("click", (e) => {
 
 loadStates();
 loadNicCodes();
+
+// ── Tabs ──────────────────────────────────────────────────────────────────
+
+const tabButtons = document.querySelectorAll(".tab-btn");
+const tabPanels = {
+  search: document.getElementById("tab-search"),
+  analytics: document.getElementById("tab-analytics"),
+};
+
+tabButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    tabButtons.forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+
+    Object.values(tabPanels).forEach((panel) => panel.classList.add("hidden"));
+    tabPanels[btn.dataset.tab].classList.remove("hidden");
+
+    if (btn.dataset.tab === "analytics" && window.loadAnalytics) {
+      window.loadAnalytics();
+    }
+  });
+});

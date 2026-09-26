@@ -1,10 +1,22 @@
 :root {
-  --primary: #1a5f3f;
-  --primary-dark: #0f3d28;
-  --border: #d8ddd9;
-  --text: #1f2924;
-  --muted: #5c6b63;
-  --bg: #f7f9f7;
+  /* Brand chrome (UI, not chart data) */
+  --brand: #1a5f3f;
+  --brand-dark: #0f3d28;
+  --brand-light: #2d8560;
+
+  /* Validated dataviz palette (light mode) -- see palette.md */
+  --surface-1: #fcfcfb;
+  --page-plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --axis: #c3c2b7;
+  --border-ring: rgba(11, 11, 11, 0.1);
+
+  --series-state: #2a78d6;    /* sequential blue */
+  --series-industry: #eb6834; /* sequential orange */
+  --series-year: #1baf7a;     /* sequential aqua */
 }
 
 * {
@@ -13,21 +25,26 @@
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  color: var(--text);
-  background: var(--bg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--text-primary);
+  background: var(--page-plane);
 }
 
 header {
-  background: var(--primary);
+  background: linear-gradient(135deg, var(--brand) 0%, var(--brand-dark) 100%);
   color: white;
-  padding: 2rem 1.5rem 1.5rem;
+}
+
+.header-inner {
+  padding: 2.25rem 1.5rem 1.5rem;
   text-align: center;
 }
 
 header h1 {
-  margin: 0 0 0.25rem;
-  font-size: 1.75rem;
+  margin: 0 0 0.35rem;
+  font-size: 1.85rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .subtitle {
@@ -36,20 +53,68 @@ header h1 {
   font-size: 0.95rem;
 }
 
+.tabs {
+  display: flex;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 0 1.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  padding: 0.85rem 1.4rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  position: relative;
+  border-radius: 0;
+}
+
+.tab-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: white;
+}
+
+.tab-btn.active {
+  color: white;
+}
+
+.tab-btn.active::after {
+  content: "";
+  position: absolute;
+  left: 1rem;
+  right: 1rem;
+  bottom: 0;
+  height: 3px;
+  background: white;
+  border-radius: 3px 3px 0 0;
+}
+
+.tab-panel.hidden {
+  display: none;
+}
+
 main {
-  max-width: 960px;
+  max-width: 1000px;
   margin: 0 auto;
-  padding: 1.5rem;
+  padding: 1.75rem 1.5rem 2.5rem;
+}
+
+.card {
+  background: var(--surface-1);
+  border-radius: 12px;
+  border: 1px solid var(--border-ring);
+  box-shadow: 0 1px 3px rgba(11, 11, 11, 0.04), 0 4px 16px rgba(11, 11, 11, 0.04);
+  padding: 1.4rem;
 }
 
 #search-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 1rem;
-  background: white;
-  padding: 1.25rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
   align-items: end;
 }
 
@@ -60,105 +125,256 @@ main {
 }
 
 .field label {
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
-  color: var(--muted);
+  color: var(--text-secondary);
 }
 
 input, select {
-  padding: 0.55rem 0.6rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--gridline);
+  border-radius: 8px;
   font-size: 0.9rem;
+  background: white;
+  color: var(--text-primary);
+  transition: border-color 0.15s ease;
+}
+
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--brand-light);
+  box-shadow: 0 0 0 3px rgba(45, 133, 96, 0.15);
 }
 
 button {
-  padding: 0.6rem 1.2rem;
-  background: var(--primary);
+  padding: 0.65rem 1.3rem;
+  background: var(--brand);
   color: white;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 0.9rem;
+  font-weight: 600;
   cursor: pointer;
   height: fit-content;
+  transition: background 0.15s ease, transform 0.1s ease;
 }
 
 button:hover {
-  background: var(--primary-dark);
+  background: var(--brand-dark);
+}
+
+button:active {
+  transform: translateY(1px);
 }
 
 button:disabled {
-  background: var(--border);
+  background: var(--gridline);
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
 .status {
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: 0.9rem;
   min-height: 1.2rem;
+  margin: 1rem 0 0.5rem;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  background: white;
-  border-radius: 8px;
+  background: var(--surface-1);
+  border-radius: 12px;
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-ring);
+  box-shadow: 0 1px 3px rgba(11, 11, 11, 0.04);
 }
 
 th, td {
   text-align: left;
-  padding: 0.7rem 0.9rem;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.88rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--gridline);
+  font-size: 0.87rem;
 }
 
 th {
-  background: #eef3f0;
-  color: var(--muted);
+  background: var(--page-plane);
+  color: var(--text-secondary);
   font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 tbody tr {
   cursor: pointer;
+  transition: background 0.1s ease;
 }
 
 tbody tr:hover {
-  background: #f0f6f2;
+  background: rgba(26, 95, 63, 0.05);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .pagination {
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 1rem;
-  margin-top: 1rem;
+  gap: 1.2rem;
+  margin-top: 1.25rem;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
 }
 
 .hidden {
   display: none !important;
 }
 
+/* ── Analytics tab ─────────────────────────────────────────────────────── */
+
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.stat-tile {
+  background: var(--surface-1);
+  border: 1px solid var(--border-ring);
+  border-radius: 12px;
+  padding: 1.1rem 1.25rem;
+  box-shadow: 0 1px 3px rgba(11, 11, 11, 0.04);
+}
+
+.stat-tile .stat-label {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+.stat-tile .stat-value {
+  font-size: 1.65rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: proportional-nums;
+}
+
+.chart-card {
+  margin-bottom: 1.25rem;
+}
+
+.chart-card h2 {
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chart-container {
+  position: relative;
+}
+
+.chart-container svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.chart-loading {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 1rem 0;
+}
+
+.bar-mark {
+  transition: opacity 0.1s ease;
+  cursor: pointer;
+}
+
+.bar-mark:hover, .bar-mark.hovered {
+  opacity: 0.82;
+}
+
+.chart-axis-label {
+  fill: var(--text-secondary);
+  font-size: 11px;
+}
+
+.chart-value-label {
+  fill: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chart-gridline {
+  stroke: var(--gridline);
+  stroke-width: 1;
+}
+
+.chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--text-primary);
+  color: white;
+  padding: 0.45rem 0.65rem;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  transform: translate(-50%, -100%);
+  box-shadow: 0 4px 12px rgba(11, 11, 11, 0.2);
+  z-index: 10;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.chart-tooltip.visible {
+  opacity: 1;
+}
+
+.chart-tooltip .tt-value {
+  font-weight: 700;
+}
+
+.chart-tooltip .tt-label {
+  color: rgba(255, 255, 255, 0.75);
+  margin-left: 0.3rem;
+}
+
+.chart-crosshair {
+  stroke: var(--axis);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+/* ── Modal ─────────────────────────────────────────────────────────────── */
+
 .modal {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(11, 11, 11, 0.5);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1rem;
+  z-index: 20;
 }
 
 .modal-content {
   background: white;
-  border-radius: 8px;
-  padding: 1.5rem;
+  border-radius: 12px;
+  padding: 1.6rem;
   max-width: 500px;
   width: 100%;
   max-height: 80vh;
   overflow-y: auto;
   position: relative;
+  box-shadow: 0 8px 40px rgba(11, 11, 11, 0.25);
 }
 
 .close-btn {
@@ -166,21 +382,28 @@ tbody tr:hover {
   top: 0.75rem;
   right: 0.75rem;
   background: none;
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: 1.5rem;
   padding: 0;
   line-height: 1;
   width: 2rem;
   height: 2rem;
+  border-radius: 8px;
 }
 
 .close-btn:hover {
-  background: var(--bg);
+  background: var(--page-plane);
 }
 
 footer {
   text-align: center;
   padding: 2rem 1rem;
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 0.8rem;
+}
+
+@media (max-width: 600px) {
+  header h1 {
+    font-size: 1.4rem;
+  }
 }

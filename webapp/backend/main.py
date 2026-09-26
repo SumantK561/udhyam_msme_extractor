@@ -27,7 +27,7 @@ logger = logging.getLogger("udyam.webapp")
 
 MAX_PAGE_SIZE = 50
 DEFAULT_PAGE_SIZE = 20
-LOOKUP_CACHE_TTL_SECONDS = 6 * 60 * 60  # states/districts/NIC codes rarely change
+LOOKUP_CACHE_TTL_SECONDS = 6 * 60 * 60  # states/districts/NIC codes/analytics change only on dbt runs
 
 app = FastAPI(title="Udyam MSME Search API", version="1.0.0")
 
@@ -118,6 +118,74 @@ def list_nic_codes():
         return [{"nic_code": r[0], "nic_description": r[1]} for r in rows]
 
     return _lookup_cache.get_or_set("nic_codes", compute)
+
+
+@app.get("/api/analytics/summary")
+def analytics_summary():
+    def compute():
+        total = _run_query("SELECT COUNT(*) FROM DIM_ENTERPRISE", {})[0][0]
+        states = _run_query(
+            "SELECT COUNT(DISTINCT state_name) FROM DIM_GEOGRAPHY WHERE state_name IS NOT NULL", {}
+        )[0][0]
+        districts = _run_query(
+            "SELECT COUNT(DISTINCT district_name) FROM DIM_GEOGRAPHY WHERE district_name IS NOT NULL", {}
+        )[0][0]
+        industries = _run_query("SELECT COUNT(*) FROM DIM_NIC_CODE", {})[0][0]
+        return {
+            "total_enterprises": total,
+            "total_states": states,
+            "total_districts": districts,
+            "total_industries": industries,
+        }
+
+    return _lookup_cache.get_or_set("analytics_summary", compute)
+
+
+@app.get("/api/analytics/by-state")
+def analytics_by_state(limit: int = Query(10, ge=1, le=20)):
+    def compute():
+        rows = _run_query(
+            "SELECT state_name, COUNT(*) AS cnt FROM DIM_ENTERPRISE "
+            "WHERE state_name IS NOT NULL GROUP BY state_name "
+            "ORDER BY cnt DESC LIMIT %(limit)s",
+            {"limit": limit},
+        )
+        return [{"label": r[0], "value": r[1]} for r in rows]
+
+    return _lookup_cache.get_or_set(("analytics_by_state", limit), compute)
+
+
+@app.get("/api/analytics/by-industry")
+def analytics_by_industry(limit: int = Query(10, ge=1, le=20)):
+    def compute():
+        rows = _run_query(
+            "SELECT b.nic_code, n.nic_description, COUNT(*) AS cnt "
+            "FROM BRIDGE_ENTERPRISE_ACTIVITY b "
+            "JOIN DIM_NIC_CODE n ON n.nic_code = b.nic_code "
+            "GROUP BY b.nic_code, n.nic_description "
+            "ORDER BY cnt DESC LIMIT %(limit)s",
+            {"limit": limit},
+        )
+        return [
+            {"label": f"{r[0]} — {r[1]}" if r[1] else r[0], "value": r[2]}
+            for r in rows
+        ]
+
+    return _lookup_cache.get_or_set(("analytics_by_industry", limit), compute)
+
+
+@app.get("/api/analytics/by-year")
+def analytics_by_year():
+    def compute():
+        rows = _run_query(
+            "SELECT YEAR(registration_date) AS yr, COUNT(*) AS cnt "
+            "FROM DIM_ENTERPRISE WHERE registration_date IS NOT NULL "
+            "GROUP BY yr ORDER BY yr",
+            {},
+        )
+        return [{"year": int(r[0]), "value": r[1]} for r in rows if r[0] is not None]
+
+    return _lookup_cache.get_or_set("analytics_by_year", compute)
 
 
 @app.get("/api/search", response_model=SearchResponse)
