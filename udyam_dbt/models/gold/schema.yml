@@ -1,6 +1,32 @@
 version: 2
 
 models:
+  - name: bridge_enterprise_activity
+    description: "One row per enterprise x NIC code. Bridges dim_enterprise and dim_nic_code for NIC-based search without Silver-schema access."
+    columns:
+      - name: enterprise_key
+        description: "FK to dim_enterprise"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_enterprise')
+                field: enterprise_key
+      - name: nic_key
+        description: "FK to dim_nic_code"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_nic_code')
+                field: nic_key
+      - name: nic_code
+        description: "5-digit NIC code"
+        data_tests:
+          - not_null
+      - name: nic_description
+        description: "Human-readable NIC activity description"
+
   - name: dim_geography
     description: "Distinct state / district / pincode combinations. One row per unique geo combination."
     columns:

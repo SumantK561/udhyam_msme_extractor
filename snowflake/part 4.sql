@@ -1,0 +1,33 @@
+-- ── Public search UI: dedicated warehouse + read-only role ─────────────────
+--
+-- Isolated from UDYAM_WH (used by the extractor/loader/dbt) so public
+-- traffic cannot contend with or inflate the cost of the ETL pipeline.
+-- Scoped to GOLD schema only -- no access to RAW, BRONZE, or SILVER.
+
+CREATE WAREHOUSE IF NOT EXISTS UDYAM_PUBLIC_WH
+    WAREHOUSE_SIZE = XSMALL
+    AUTO_SUSPEND = 30
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE;
+
+CREATE ROLE IF NOT EXISTS UDYAM_PUBLIC_READER;
+
+GRANT USAGE ON WAREHOUSE UDYAM_PUBLIC_WH   TO ROLE UDYAM_PUBLIC_READER;
+GRANT USAGE ON DATABASE  UDYAM             TO ROLE UDYAM_PUBLIC_READER;
+GRANT USAGE ON SCHEMA    UDYAM.RAW_GOLD    TO ROLE UDYAM_PUBLIC_READER;
+
+GRANT SELECT ON ALL TABLES    IN SCHEMA UDYAM.RAW_GOLD TO ROLE UDYAM_PUBLIC_READER;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA UDYAM.RAW_GOLD TO ROLE UDYAM_PUBLIC_READER;
+
+-- ── Service user for the public API ────────────────────────────────────────
+CREATE USER IF NOT EXISTS UDYAM_PUBLIC_SVC
+    PASSWORD             = 'ReplaceWithStrongPassword!'
+    DEFAULT_ROLE         = UDYAM_PUBLIC_READER
+    DEFAULT_WAREHOUSE    = UDYAM_PUBLIC_WH
+    DEFAULT_NAMESPACE    = UDYAM.RAW_GOLD
+    MUST_CHANGE_PASSWORD = FALSE;
+
+GRANT ROLE UDYAM_PUBLIC_READER TO USER UDYAM_PUBLIC_SVC;
+
+-- ── Statement timeout guard (defense in depth against runaway scans) ───────
+ALTER USER UDYAM_PUBLIC_SVC SET STATEMENT_TIMEOUT_IN_SECONDS = 15;

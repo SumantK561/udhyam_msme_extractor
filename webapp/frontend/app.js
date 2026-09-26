@@ -1,0 +1,202 @@
+const API_BASE = "/api";
+
+const state = {
+  page: 1,
+  pageSize: 20,
+  hasNext: false,
+};
+
+const els = {
+  form: document.getElementById("search-form"),
+  name: document.getElementById("name"),
+  stateSelect: document.getElementById("state"),
+  districtSelect: document.getElementById("district"),
+  nicSelect: document.getElementById("nic_code"),
+  status: document.getElementById("status"),
+  table: document.getElementById("results-table"),
+  tbody: document.getElementById("results-body"),
+  pagination: document.getElementById("pagination"),
+  prevBtn: document.getElementById("prev-page"),
+  nextBtn: document.getElementById("next-page"),
+  pageLabel: document.getElementById("page-label"),
+  modal: document.getElementById("detail-modal"),
+  closeModal: document.getElementById("close-modal"),
+  detailName: document.getElementById("detail-name"),
+  detailAddress: document.getElementById("detail-address"),
+  detailLocation: document.getElementById("detail-location"),
+  detailRegistration: document.getElementById("detail-registration"),
+  detailActivities: document.getElementById("detail-activities"),
+};
+
+async function loadStates() {
+  const res = await fetch(`${API_BASE}/meta/states`);
+  const states = await res.json();
+  for (const s of states) {
+    const opt = document.createElement("option");
+    opt.value = s;
+    opt.textContent = s;
+    els.stateSelect.appendChild(opt);
+  }
+}
+
+async function loadNicCodes() {
+  const res = await fetch(`${API_BASE}/meta/nic-codes`);
+  const codes = await res.json();
+  for (const c of codes) {
+    const opt = document.createElement("option");
+    opt.value = c.nic_code;
+    opt.textContent = c.nic_description ? `${c.nic_code} — ${c.nic_description}` : c.nic_code;
+    els.nicSelect.appendChild(opt);
+  }
+}
+
+async function loadDistricts(stateName) {
+  els.districtSelect.innerHTML = '<option value="">All districts</option>';
+  if (!stateName) {
+    els.districtSelect.disabled = true;
+    return;
+  }
+  els.districtSelect.disabled = false;
+  const res = await fetch(`${API_BASE}/meta/districts?state=${encodeURIComponent(stateName)}`);
+  const districts = await res.json();
+  for (const d of districts) {
+    const opt = document.createElement("option");
+    opt.value = d;
+    opt.textContent = d;
+    els.districtSelect.appendChild(opt);
+  }
+}
+
+function buildSearchParams() {
+  const params = new URLSearchParams();
+  const name = els.name.value.trim();
+  if (name) params.set("name", name);
+  if (els.stateSelect.value) params.set("state", els.stateSelect.value);
+  if (els.districtSelect.value) params.set("district", els.districtSelect.value);
+  if (els.nicSelect.value) params.set("nic_code", els.nicSelect.value);
+  params.set("page", state.page);
+  params.set("page_size", state.pageSize);
+  return params;
+}
+
+async function runSearch() {
+  const name = els.name.value.trim();
+  if (!name && !els.stateSelect.value && !els.districtSelect.value && !els.nicSelect.value) {
+    els.status.textContent = "Enter an enterprise name or choose a filter to search.";
+    els.table.classList.add("hidden");
+    els.pagination.classList.add("hidden");
+    return;
+  }
+  if (name && name.length < 2) {
+    els.status.textContent = "Enter at least 2 characters to search by name.";
+    return;
+  }
+
+  els.status.textContent = "Searching…";
+  els.table.classList.add("hidden");
+  els.pagination.classList.add("hidden");
+
+  try {
+    const params = buildSearchParams();
+    const res = await fetch(`${API_BASE}/search?${params.toString()}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      els.status.textContent = err.detail || "Search failed. Try again.";
+      return;
+    }
+    const data = await res.json();
+    renderResults(data);
+  } catch (e) {
+    els.status.textContent = "Search failed. Try again.";
+  }
+}
+
+function renderResults(data) {
+  els.tbody.innerHTML = "";
+  state.hasNext = data.has_next;
+
+  if (data.results.length === 0) {
+    els.status.textContent = "No results found.";
+    els.table.classList.add("hidden");
+    els.pagination.classList.add("hidden");
+    return;
+  }
+
+  els.status.textContent = `Showing ${data.results.length} result(s)`;
+  els.table.classList.remove("hidden");
+  els.pagination.classList.remove("hidden");
+  els.pageLabel.textContent = `Page ${data.page}`;
+  els.prevBtn.disabled = data.page <= 1;
+  els.nextBtn.disabled = !data.has_next;
+
+  for (const row of data.results) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(row.enterprise_name)}</td>
+      <td>${escapeHtml(row.state_name || "")}</td>
+      <td>${escapeHtml(row.district_name || "")}</td>
+      <td>${escapeHtml(row.pincode || "")}</td>
+      <td>${escapeHtml(row.registration_date || "")}</td>
+    `;
+    tr.addEventListener("click", () => showDetail(row.enterprise_key));
+    els.tbody.appendChild(tr);
+  }
+}
+
+async function showDetail(enterpriseKey) {
+  const res = await fetch(`${API_BASE}/enterprise/${encodeURIComponent(enterpriseKey)}`);
+  if (!res.ok) return;
+  const d = await res.json();
+
+  els.detailName.textContent = d.enterprise_name;
+  els.detailAddress.textContent = d.communication_address || "";
+  els.detailLocation.textContent = [d.district_name, d.state_name, d.pincode].filter(Boolean).join(", ");
+  els.detailRegistration.textContent = d.registration_date ? `Registered: ${d.registration_date}` : "";
+
+  els.detailActivities.innerHTML = "";
+  for (const a of d.activities) {
+    const li = document.createElement("li");
+    li.textContent = a.nic_description ? `${a.nic_code} — ${a.nic_description}` : a.nic_code;
+    els.detailActivities.appendChild(li);
+  }
+
+  els.modal.classList.remove("hidden");
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+els.form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  state.page = 1;
+  runSearch();
+});
+
+els.stateSelect.addEventListener("change", () => {
+  loadDistricts(els.stateSelect.value);
+});
+
+els.prevBtn.addEventListener("click", () => {
+  if (state.page > 1) {
+    state.page -= 1;
+    runSearch();
+  }
+});
+
+els.nextBtn.addEventListener("click", () => {
+  if (state.hasNext) {
+    state.page += 1;
+    runSearch();
+  }
+});
+
+els.closeModal.addEventListener("click", () => els.modal.classList.add("hidden"));
+els.modal.addEventListener("click", (e) => {
+  if (e.target === els.modal) els.modal.classList.add("hidden");
+});
+
+loadStates();
+loadNicCodes();
