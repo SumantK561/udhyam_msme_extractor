@@ -200,7 +200,7 @@ function renderLineChart(container, data, color) {
 
   data.forEach((d, i) => {
     svg.appendChild(
-      svgEl("circle", { cx: xFor(i), cy: yFor(d.value), r: 5, fill: color, stroke: "var(--surface-1)", "stroke-width": 2 })
+      svgEl("circle", { cx: xFor(i), cy: yFor(d.value), r: 5, fill: color, stroke: "var(--card)", "stroke-width": 2 })
     );
   });
 
