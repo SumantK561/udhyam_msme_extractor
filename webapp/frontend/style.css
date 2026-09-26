@@ -26,6 +26,10 @@
   --axis: #3a3e54;
   --radius: 14px;
 
+  /* Status palette (fixed, never themed -- see palette.md) */
+  --delta-up: #0ca30c;
+  --delta-down: #d03b3b;
+
   --font-heading: "Sora", system-ui, sans-serif;
   --font-body: "Inter", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
@@ -384,6 +388,63 @@ tbody tr:last-child td {
   font-size: 1rem;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.chart-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.chart-card-header h2 {
+  margin: 0;
+}
+
+.chart-legend {
+  display: flex;
+  gap: 1rem;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.legend-swatch {
+  width: 18px;
+  height: 0;
+  border-top: 2px solid var(--series-year);
+}
+
+.legend-swatch.dashed {
+  border-top-style: dashed;
+  opacity: 0.6;
+}
+
+.stat-value.positive .stat-arrow {
+  color: var(--delta-up);
+}
+
+.stat-value.negative .stat-arrow {
+  color: var(--delta-down);
+}
+
+.stat-value.positive {
+  color: var(--delta-up);
+}
+
+.stat-value.negative {
+  color: var(--delta-down);
+}
+
+.stat-arrow {
+  font-size: 0.9em;
+  margin-right: 0.3em;
 }
 
 .chart-container {

@@ -95,6 +95,22 @@
       <div id="stat-tiles" class="stat-tiles"></div>
 
       <div class="card chart-card">
+        <div class="chart-card-header">
+          <h2>Monthly registration trend (with 3-month forecast)</h2>
+          <div class="chart-legend">
+            <span class="legend-item"><span class="legend-swatch solid"></span>Actual</span>
+            <span class="legend-item"><span class="legend-swatch dashed"></span>Forecast</span>
+          </div>
+        </div>
+        <div id="chart-by-month" class="chart-container"></div>
+      </div>
+
+      <div class="card chart-card">
+        <h2>Registrations by year (YoY change)</h2>
+        <div id="chart-by-year" class="chart-container"></div>
+      </div>
+
+      <div class="card chart-card">
         <h2>Top 10 states by registered enterprises</h2>
         <div id="chart-by-state" class="chart-container"></div>
       </div>
@@ -102,11 +118,6 @@
       <div class="card chart-card">
         <h2>Top 10 industries (NIC code) by registered enterprises</h2>
         <div id="chart-by-industry" class="chart-container"></div>
-      </div>
-
-      <div class="card chart-card">
-        <h2>Registrations by year</h2>
-        <div id="chart-by-year" class="chart-container"></div>
       </div>
     </section>
   </main>

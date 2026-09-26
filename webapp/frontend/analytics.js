@@ -17,6 +17,18 @@ function truncateLabel(text, maxChars) {
   return text.slice(0, maxChars - 1) + "…";
 }
 
+function fmtSigned(pct) {
+  if (pct === null || pct === undefined) return null;
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${pct.toFixed(1)}%`;
+}
+
+function fmtMonthLabel(period) {
+  const [y, m] = period.split("-");
+  const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${names[parseInt(m, 10) - 1]} '${y.slice(2)}`;
+}
+
 function svgEl(tag, attrs) {
   const el = document.createElementNS(SVG_NS, tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -152,11 +164,18 @@ function renderBarChart(container, data, color) {
 }
 
 /**
- * Line chart with crosshair + point tooltips (registrations per year).
+ * Line chart with crosshair + point tooltips.
+ *
+ * points: [{ label, value, projected?, delta? }]
+ * - `projected` points render as a dashed continuation in a lighter step
+ *   of the same hue, with hollow dots (see dataviz skill: identity by
+ *   texture/style, never hue alone, for the actual-vs-forecast split).
+ * - `delta` (signed % string) is direct-labeled only on the last actual
+ *   point -- labeling every point would be noise.
  */
-function renderLineChart(container, data, color) {
+function renderLineChart(container, points, color, opts = {}) {
   container.innerHTML = "";
-  if (!data.length) {
+  if (!points.length) {
     container.innerHTML = '<p class="chart-loading">No data available.</p>';
     return;
   }
@@ -175,9 +194,11 @@ function renderLineChart(container, data, color) {
   container._vbWidth = chartW;
   container._vbHeight = height;
 
-  const maxValue = Math.max(...data.map((d) => d.value));
-  const xFor = (i) => leftPad + (data.length === 1 ? plotW / 2 : (i / (data.length - 1)) * plotW);
+  const maxValue = Math.max(...points.map((d) => d.value));
+  const xFor = (i) => leftPad + (points.length === 1 ? plotW / 2 : (i / (points.length - 1)) * plotW);
   const yFor = (v) => topPad + plotH - (v / maxValue) * plotH;
+
+  const splitIndex = points.findIndex((d) => d.projected);
 
   for (let f = 0; f <= 1; f += 0.25) {
     const gy = topPad + plotH * (1 - f);
@@ -187,22 +208,63 @@ function renderLineChart(container, data, color) {
     svg.appendChild(tick);
   }
 
-  data.forEach((d, i) => {
+  // Thin x-axis labels to avoid collision when there are many points
+  const maxLabels = 9;
+  const step = Math.max(1, Math.ceil(points.length / maxLabels));
+  points.forEach((d, i) => {
+    const isLast = i === points.length - 1;
+    if (i % step !== 0 && !isLast) return;
     const label = svgEl("text", {
       x: xFor(i), y: height - 8, class: "chart-axis-label", "text-anchor": "middle",
     });
-    label.textContent = d.year;
+    label.textContent = opts.xLabel ? opts.xLabel(d) : d.label;
     svg.appendChild(label);
   });
 
-  const points = data.map((d, i) => `${xFor(i)},${yFor(d.value)}`).join(" ");
-  svg.appendChild(svgEl("polyline", { points, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  // Divider between actual and forecast
+  if (splitIndex > 0) {
+    const dx = (xFor(splitIndex - 1) + xFor(splitIndex)) / 2;
+    svg.appendChild(svgEl("line", { x1: dx, x2: dx, y1: topPad, y2: topPad + plotH, class: "chart-gridline", "stroke-dasharray": "3 3" }));
+  }
 
-  data.forEach((d, i) => {
+  const actualEnd = splitIndex === -1 ? points.length : splitIndex;
+  const actualPoints = points.slice(0, actualEnd).map((d, i) => `${xFor(i)},${yFor(d.value)}`).join(" ");
+  svg.appendChild(svgEl("polyline", { points: actualPoints, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+
+  if (splitIndex > -1) {
+    const forecastPoints = points.slice(splitIndex - 1).map((d, i) => `${xFor(splitIndex - 1 + i)},${yFor(d.value)}`).join(" ");
+    svg.appendChild(svgEl("polyline", {
+      points: forecastPoints, fill: "none", stroke: color, "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round", "stroke-dasharray": "6 4", opacity: 0.6,
+    }));
+  }
+
+  points.forEach((d, i) => {
+    const isProjected = !!d.projected;
     svg.appendChild(
-      svgEl("circle", { cx: xFor(i), cy: yFor(d.value), r: 5, fill: color, stroke: "var(--card)", "stroke-width": 2 })
+      svgEl("circle", {
+        cx: xFor(i), cy: yFor(d.value), r: 5,
+        fill: isProjected ? "var(--card)" : color,
+        stroke: color, "stroke-width": 2,
+        opacity: isProjected ? 0.7 : 1,
+      })
     );
   });
+
+  // Selective delta label -- last actual point only
+  if (opts.showDelta && actualEnd > 0) {
+    const idx = actualEnd - 1;
+    const d = points[idx];
+    if (d.delta !== null && d.delta !== undefined) {
+      const deltaLabel = svgEl("text", {
+        x: xFor(idx), y: yFor(d.value) - 14,
+        class: "chart-value-label", "text-anchor": "middle",
+        fill: d.delta.startsWith("-") ? "var(--delta-down)" : "var(--delta-up)",
+      });
+      deltaLabel.textContent = d.delta;
+      svg.appendChild(deltaLabel);
+    }
+  }
 
   const crosshair = svgEl("line", { x1: 0, x2: 0, y1: topPad, y2: topPad + plotH, class: "chart-crosshair hidden" });
   svg.appendChild(crosshair);
@@ -217,17 +279,23 @@ function renderLineChart(container, data, color) {
     const px = ((e.clientX - rect.left) / rect.width) * chartW;
     let nearest = 0;
     let minDist = Infinity;
-    data.forEach((d, i) => {
+    points.forEach((d, i) => {
       const dist = Math.abs(xFor(i) - px);
       if (dist < minDist) {
         minDist = dist;
         nearest = i;
       }
     });
+    const d = points[nearest];
+    const tagText = opts.xLabel ? opts.xLabel(d) : d.label;
     crosshair.setAttribute("x1", xFor(nearest));
     crosshair.setAttribute("x2", xFor(nearest));
     crosshair.classList.remove("hidden");
-    showTooltip(container, tooltip, xFor(nearest), yFor(data[nearest].value), fmtFull(data[nearest].value), `in ${data[nearest].year}`);
+    showTooltip(
+      container, tooltip, xFor(nearest), yFor(d.value),
+      fmtFull(d.value),
+      d.projected ? `${tagText} (forecast)` : tagText
+    );
   });
 
   hitArea.addEventListener("pointerleave", () => {
@@ -236,20 +304,25 @@ function renderLineChart(container, data, color) {
   });
 }
 
-function renderStatTiles(container, stats) {
+function renderStatTiles(container, stats, momPct, yoyPct) {
   container.innerHTML = "";
   const tiles = [
-    { label: "Total enterprises", value: stats.total_enterprises },
-    { label: "States covered", value: stats.total_states },
-    { label: "Districts covered", value: stats.total_districts },
-    { label: "Industries (NIC codes)", value: stats.total_industries },
+    { label: "Total enterprises", value: fmtCompact(stats.total_enterprises) },
+    { label: "States covered", value: fmtCompact(stats.total_states) },
+    { label: "Districts covered", value: fmtCompact(stats.total_districts) },
+    { label: "Industries (NIC codes)", value: fmtCompact(stats.total_industries) },
+    { label: "Latest month, MoM", value: fmtSigned(momPct) || "—", delta: momPct },
+    { label: "Latest year, YoY", value: fmtSigned(yoyPct) || "—", delta: yoyPct },
   ];
   for (const t of tiles) {
     const tile = document.createElement("div");
     tile.className = "stat-tile";
+    const hasDelta = t.delta !== undefined && t.delta !== null;
+    const deltaClass = hasDelta ? (t.delta >= 0 ? "positive" : "negative") : "";
+    const arrow = hasDelta ? (t.delta >= 0 ? "▲" : "▼") : "";
     tile.innerHTML = `
       <div class="stat-label">${t.label}</div>
-      <div class="stat-value">${fmtCompact(t.value)}</div>
+      <div class="stat-value ${deltaClass}">${arrow ? `<span class="stat-arrow">${arrow}</span>` : ""}${t.value}</div>
     `;
     container.appendChild(tile);
   }
@@ -263,28 +336,45 @@ async function loadAnalytics() {
   const byStateEl = document.getElementById("chart-by-state");
   const byIndustryEl = document.getElementById("chart-by-industry");
   const byYearEl = document.getElementById("chart-by-year");
+  const byMonthEl = document.getElementById("chart-by-month");
 
   statTiles.innerHTML = '<p class="chart-loading">Loading…</p>';
   byStateEl.innerHTML = '<p class="chart-loading">Loading…</p>';
   byIndustryEl.innerHTML = '<p class="chart-loading">Loading…</p>';
   byYearEl.innerHTML = '<p class="chart-loading">Loading…</p>';
+  byMonthEl.innerHTML = '<p class="chart-loading">Loading…</p>';
+
+  const colorState = getComputedStyle(document.documentElement).getPropertyValue("--series-state").trim();
+  const colorIndustry = getComputedStyle(document.documentElement).getPropertyValue("--series-industry").trim();
+  const colorYear = getComputedStyle(document.documentElement).getPropertyValue("--series-year").trim();
 
   try {
-    const [summary, byState, byIndustry, byYear] = await Promise.all([
+    const [summary, byState, byIndustry, byYear, byMonth] = await Promise.all([
       fetch(`${API_BASE_A}/analytics/summary`).then((r) => r.json()),
       fetch(`${API_BASE_A}/analytics/by-state`).then((r) => r.json()),
       fetch(`${API_BASE_A}/analytics/by-industry`).then((r) => r.json()),
       fetch(`${API_BASE_A}/analytics/by-year`).then((r) => r.json()),
+      fetch(`${API_BASE_A}/analytics/by-month`).then((r) => r.json()),
     ]);
 
-    renderStatTiles(statTiles, summary);
-    renderBarChart(byStateEl, byState, getComputedStyle(document.documentElement).getPropertyValue("--series-state").trim());
-    renderBarChart(byIndustryEl, byIndustry, getComputedStyle(document.documentElement).getPropertyValue("--series-industry").trim());
+    const latestYoy = byYear.length ? byYear[byYear.length - 1].yoy_change_pct : null;
+    renderStatTiles(statTiles, summary, byMonth.mom_change_pct, latestYoy);
+
+    renderBarChart(byStateEl, byState, colorState);
+    renderBarChart(byIndustryEl, byIndustry, colorIndustry);
+
     renderLineChart(
       byYearEl,
-      byYear.map((d) => ({ year: d.year, value: d.value })),
-      getComputedStyle(document.documentElement).getPropertyValue("--series-year").trim()
+      byYear.map((d) => ({ label: d.year, value: d.value, delta: fmtSigned(d.yoy_change_pct) })),
+      colorYear,
+      { showDelta: true }
     );
+
+    const monthPoints = [
+      ...byMonth.history.map((d) => ({ label: d.period, value: d.value })),
+      ...byMonth.forecast.map((d) => ({ label: d.period, value: d.value, projected: true })),
+    ];
+    renderLineChart(byMonthEl, monthPoints, colorYear, { xLabel: (d) => fmtMonthLabel(d.label) });
   } catch (e) {
     statTiles.innerHTML = '<p class="chart-loading">Failed to load analytics.</p>';
     analyticsLoaded = false;

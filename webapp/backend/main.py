@@ -83,6 +83,35 @@ def _run_query(sql: str, params: dict) -> list[tuple]:
         return cur.fetchall()
 
 
+def _linear_forecast(values: list[float], periods_ahead: int) -> list[float]:
+    """Ordinary least squares over the index (0..n-1) -> value, extrapolated forward."""
+    n = len(values)
+    if n < 2:
+        return [values[-1] if values else 0.0] * periods_ahead
+
+    xs = list(range(n))
+    mean_x = sum(xs) / n
+    mean_y = sum(values) / n
+    denom = sum((x - mean_x) ** 2 for x in xs)
+    slope = (sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, values)) / denom) if denom else 0.0
+    intercept = mean_y - slope * mean_x
+
+    return [max(0.0, intercept + slope * (n - 1 + i)) for i in range(1, periods_ahead + 1)]
+
+
+def _next_periods(last_period: str, count: int) -> list[str]:
+    """last_period is 'YYYY-MM' -> returns the next `count` 'YYYY-MM' strings."""
+    year, month = (int(p) for p in last_period.split("-"))
+    out = []
+    for _ in range(count):
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+        out.append(f"{year:04d}-{month:02d}")
+    return out
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -191,9 +220,50 @@ def analytics_by_year():
             "GROUP BY yr ORDER BY yr",
             {},
         )
-        return [{"year": int(r[0]), "value": r[1]} for r in rows if r[0] is not None]
+        points = [{"year": int(r[0]), "value": r[1]} for r in rows if r[0] is not None]
+        for i, p in enumerate(points):
+            prev = points[i - 1]["value"] if i > 0 else None
+            p["yoy_change_pct"] = round((p["value"] - prev) / prev * 100, 1) if prev else None
+        return points
 
     return _lookup_cache.get_or_set("analytics_by_year", compute)
+
+
+@app.get("/api/analytics/by-month")
+def analytics_by_month(months_back: int = Query(24, ge=6, le=60), forecast_months: int = Query(3, ge=0, le=12)):
+    def compute():
+        rows = _run_query(
+            "SELECT TO_CHAR(registration_date, 'YYYY-MM') AS period, COUNT(*) AS cnt "
+            "FROM DIM_ENTERPRISE "
+            "WHERE registration_date >= DATEADD(month, -%(months_back)s, CURRENT_DATE()) "
+            "GROUP BY period ORDER BY period",
+            {"months_back": months_back},
+        )
+        history = [{"period": r[0], "value": r[1]} for r in rows]
+
+        forecast = []
+        if history and forecast_months > 0:
+            values = [p["value"] for p in history]
+            forecasted_values = _linear_forecast(values, forecast_months)
+            forecast_periods = _next_periods(history[-1]["period"], forecast_months)
+            forecast = [
+                {"period": period, "value": round(val)}
+                for period, val in zip(forecast_periods, forecasted_values)
+            ]
+
+        mom_change_pct = None
+        if len(history) >= 2 and history[-2]["value"]:
+            mom_change_pct = round(
+                (history[-1]["value"] - history[-2]["value"]) / history[-2]["value"] * 100, 1
+            )
+
+        return {
+            "history": history,
+            "forecast": forecast,
+            "mom_change_pct": mom_change_pct,
+        }
+
+    return _lookup_cache.get_or_set(("analytics_by_month", months_back, forecast_months), compute)
 
 
 @app.get("/api/search", response_model=SearchResponse)
