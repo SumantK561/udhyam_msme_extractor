@@ -278,8 +278,21 @@ els.modal.addEventListener("click", (e) => {
   if (e.target === els.modal) els.modal.classList.add("hidden");
 });
 
+async function loadDataFreshness() {
+  const el = document.getElementById("data-freshness");
+  try {
+    const res = await fetch(`${API_BASE}/meta/last-updated`);
+    const data = await res.json();
+    if (!data.last_updated) return;
+    el.textContent = `Data last updated on ${data.last_updated} — next scheduled update on ${data.next_scheduled}`;
+  } catch (e) {
+    // freshness line is informational only -- fail silently
+  }
+}
+
 loadStates();
 loadNicCodes();
+loadDataFreshness();
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
 

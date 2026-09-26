@@ -51,7 +51,7 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - Snowflake connected to S3 via Storage Integration (no long-lived AWS keys in Snowflake)
 - Least-privilege IAM policy for the extractor service account (`s3:PutObject`, `s3:GetObject` scoped to prefix)
 - **dbt Bronze / Silver / Gold transformation layer** with 7 models, 45 data tests, and MD5 surrogate keys
-- **Airflow orchestration** — weekly incremental DAG + manual full-refresh DAG; systemd-managed scheduler and webserver on EC2
+- **Airflow orchestration** — bi-weekly incremental DAG + manual full-refresh DAG; systemd-managed scheduler and webserver on EC2
 - **Public MSME search webapp** — FastAPI + static frontend over the Gold star schema, dedicated read-only Snowflake role and warehouse, nginx + Let's Encrypt
 
 ### Planned
@@ -138,7 +138,7 @@ Udyam_MSME/
 │       ├── cd.yml            # Auto-deploy to EC2 on merge to main
 │       └── run-pipeline.yml  # Manual extraction + Snowflake load (state dropdown)
 ├── dags/
-│   ├── udyam_incremental_pipeline.py   # Weekly incremental DAG (extract → load → dbt run)
+│   ├── udyam_incremental_pipeline.py   # Bi-weekly incremental DAG (extract → load → dbt run)
 │   └── udyam_full_refresh_pipeline.py  # Manual full-refresh DAG (extract → load → dbt run --full-refresh)
 ├── webapp/
 │   ├── backend/
@@ -657,7 +657,7 @@ Two DAGs live in `dags/`. Airflow runs in a dedicated virtualenv (`~/airflow-ven
 
 | DAG | Schedule | Purpose |
 |---|---|---|
-| `udyam_incremental_pipeline` | Weekly (Sunday midnight UTC) | Extract new records → load → `dbt run` |
+| `udyam_incremental_pipeline` | Bi-weekly (every 14 days) | Extract new records → load → `dbt run` |
 | `udyam_full_refresh_pipeline` | Manual only | Extract all 36 states → load → `dbt run --full-refresh` |
 
 Both DAGs share the same three-task structure:
