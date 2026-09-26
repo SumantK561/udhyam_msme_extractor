@@ -1,7 +1,9 @@
 """
-Weekly incremental pipeline: extract new MSME records → Snowflake → dbt.
+Bi-weekly incremental pipeline: extract new MSME records → Snowflake → dbt.
 
-Schedule: every Sunday at midnight UTC.
+Schedule: every 14 days from the anchor start_date below (cron has no
+native "every 2 weeks" -- a fixed timedelta interval is the reliable way
+to express it in Airflow).
 Each run picks up only records added since the previous run (new registrations).
 """
 
@@ -25,8 +27,8 @@ default_args = {
 with DAG(
     dag_id="udyam_incremental_pipeline",
     default_args=default_args,
-    description="Weekly incremental MSME extraction → Snowflake → dbt",
-    schedule_interval="0 0 * * 0",
+    description="Bi-weekly incremental MSME extraction → Snowflake → dbt",
+    schedule_interval=timedelta(days=14),
     start_date=datetime(2026, 9, 21),
     catchup=False,
     tags=["udyam", "msme", "incremental"],

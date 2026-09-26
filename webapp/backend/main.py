@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -25,6 +26,7 @@ load_dotenv()
 logging.basicConfig(level=os.getenv("UDYAM_WEB_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("udyam.webapp")
 
+PIPELINE_SCHEDULE_DAYS = 14  # must match dags/udyam_incremental_pipeline.py's schedule_interval
 PAGE_SIZE_OPTIONS = (10, 20, 50, 100)
 MAX_PAGE_SIZE = max(PAGE_SIZE_OPTIONS)
 DEFAULT_PAGE_SIZE = 20
@@ -155,6 +157,26 @@ def list_nic_codes():
         return [{"nic_code": r[0], "nic_description": r[1]} for r in rows]
 
     return _lookup_cache.get_or_set("nic_codes", compute)
+
+
+@app.get("/api/meta/last-updated")
+def last_updated():
+    def compute():
+        row = _run_query(
+            "SELECT MAX(LAST_ALTERED) FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_SCHEMA = 'RAW_GOLD'",
+            {},
+        )
+        last = row[0][0] if row else None
+        if last is None:
+            return {"last_updated": None, "next_scheduled": None}
+        next_scheduled = last + timedelta(days=PIPELINE_SCHEDULE_DAYS)
+        return {
+            "last_updated": last.strftime("%d-%b-%Y"),
+            "next_scheduled": next_scheduled.strftime("%d-%b-%Y"),
+        }
+
+    return _lookup_cache.get_or_set("last_updated", compute)
 
 
 @app.get("/api/analytics/summary")
