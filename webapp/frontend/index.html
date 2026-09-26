@@ -55,6 +55,19 @@
         <button type="submit">Search</button>
       </form>
 
+      <div id="results-bar" class="results-bar hidden">
+        <span id="results-count"></span>
+        <div class="field page-size-field">
+          <label for="page-size">Rows per page</label>
+          <select id="page-size">
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </div>
+      </div>
+
       <p id="status" class="status"></p>
 
       <table id="results-table" class="hidden">
@@ -71,8 +84,8 @@
       </table>
 
       <div id="pagination" class="pagination hidden">
-        <button id="prev-page">&larr; Previous</button>
-        <span id="page-label">Page 1</span>
+        <button id="prev-page">&larr; Prev</button>
+        <div id="page-numbers" class="page-numbers"></div>
         <button id="next-page">Next &rarr;</button>
       </div>
     </section>

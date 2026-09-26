@@ -30,4 +30,6 @@ CREATE USER IF NOT EXISTS UDYAM_PUBLIC_SVC
 GRANT ROLE UDYAM_PUBLIC_READER TO USER UDYAM_PUBLIC_SVC;
 
 -- ── Statement timeout guard (defense in depth against runaway scans) ───────
-ALTER USER UDYAM_PUBLIC_SVC SET STATEMENT_TIMEOUT_IN_SECONDS = 15;
+-- 30s to accommodate COUNT(*) over a wildcard ILIKE name search on 37M+ rows
+-- (search page also runs one of these per unique filter set, 5-min cached).
+ALTER USER UDYAM_PUBLIC_SVC SET STATEMENT_TIMEOUT_IN_SECONDS = 30;

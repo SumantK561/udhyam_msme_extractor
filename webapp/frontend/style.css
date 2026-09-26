@@ -208,6 +208,34 @@ button:disabled {
   margin: 1rem 0 0.5rem;
 }
 
+.results-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 1.1rem;
+  gap: 1rem;
+}
+
+#results-count {
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+}
+
+.page-size-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.page-size-field label {
+  white-space: nowrap;
+}
+
+.page-size-field select {
+  padding: 0.35rem 0.5rem;
+  width: auto;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -258,10 +286,56 @@ tbody tr:last-child td {
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 1.2rem;
+  gap: 0.6rem;
   margin-top: 1.25rem;
   color: var(--text-secondary);
   font-size: 0.88rem;
+}
+
+.pagination button#prev-page,
+.pagination button#next-page {
+  background: var(--card-alt);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 0.5rem 0.9rem;
+}
+
+.pagination button#prev-page:hover:not(:disabled),
+.pagination button#next-page:hover:not(:disabled) {
+  background: var(--muted-bg);
+}
+
+.page-numbers {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.page-num {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  padding: 0.4rem 0.65rem;
+  min-width: 2.1rem;
+  border-radius: 8px;
+}
+
+.page-num:hover {
+  background: var(--muted-bg);
+  color: var(--text-primary);
+}
+
+.page-num.active {
+  background: var(--primary);
+  color: white;
+  font-weight: 700;
+}
+
+.page-ellipsis {
+  color: var(--text-muted);
+  padding: 0 0.2rem;
 }
 
 .hidden {

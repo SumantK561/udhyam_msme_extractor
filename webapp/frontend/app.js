@@ -4,6 +4,9 @@ const state = {
   page: 1,
   pageSize: 20,
   hasNext: false,
+  hasPrev: false,
+  totalPages: 1,
+  hasSearched: false,
 };
 
 const els = {
@@ -13,12 +16,15 @@ const els = {
   districtSelect: document.getElementById("district"),
   nicSelect: document.getElementById("nic_code"),
   status: document.getElementById("status"),
+  resultsBar: document.getElementById("results-bar"),
+  resultsCount: document.getElementById("results-count"),
+  pageSizeSelect: document.getElementById("page-size"),
   table: document.getElementById("results-table"),
   tbody: document.getElementById("results-body"),
   pagination: document.getElementById("pagination"),
   prevBtn: document.getElementById("prev-page"),
   nextBtn: document.getElementById("next-page"),
-  pageLabel: document.getElementById("page-label"),
+  pageNumbers: document.getElementById("page-numbers"),
   modal: document.getElementById("detail-modal"),
   closeModal: document.getElementById("close-modal"),
   detailName: document.getElementById("detail-name"),
@@ -85,6 +91,7 @@ async function runSearch() {
     els.status.textContent = "Enter an enterprise name or choose a filter to search.";
     els.table.classList.add("hidden");
     els.pagination.classList.add("hidden");
+    els.resultsBar.classList.add("hidden");
     return;
   }
   if (name && name.length < 2) {
@@ -92,9 +99,11 @@ async function runSearch() {
     return;
   }
 
+  state.hasSearched = true;
   els.status.textContent = "Searching…";
   els.table.classList.add("hidden");
   els.pagination.classList.add("hidden");
+  els.resultsBar.classList.add("hidden");
 
   try {
     const params = buildSearchParams();
@@ -111,23 +120,68 @@ async function runSearch() {
   }
 }
 
+function buildPageList(current, total) {
+  const pages = new Set([1, total, current, current - 1, current + 1]);
+  const sorted = [...pages].filter((p) => p >= 1 && p <= total).sort((a, b) => a - b);
+
+  const result = [];
+  let prev = null;
+  for (const p of sorted) {
+    if (prev !== null && p - prev > 1) result.push("…");
+    result.push(p);
+    prev = p;
+  }
+  return result;
+}
+
+function renderPageNumbers(current, total) {
+  els.pageNumbers.innerHTML = "";
+  for (const p of buildPageList(current, total)) {
+    if (p === "…") {
+      const span = document.createElement("span");
+      span.className = "page-ellipsis";
+      span.textContent = "…";
+      els.pageNumbers.appendChild(span);
+      continue;
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "page-num" + (p === current ? " active" : "");
+    btn.textContent = p;
+    btn.addEventListener("click", () => {
+      if (p !== state.page) {
+        state.page = p;
+        runSearch();
+      }
+    });
+    els.pageNumbers.appendChild(btn);
+  }
+}
+
 function renderResults(data) {
   els.tbody.innerHTML = "";
+  state.page = data.page;
   state.hasNext = data.has_next;
+  state.hasPrev = data.has_prev;
+  state.totalPages = data.total_pages;
+
+  els.resultsBar.classList.remove("hidden");
+  els.resultsCount.textContent =
+    data.total === 0 ? "No results found." : `${data.total.toLocaleString("en-IN")} result(s) found`;
 
   if (data.results.length === 0) {
-    els.status.textContent = "No results found.";
+    els.status.textContent = "";
     els.table.classList.add("hidden");
     els.pagination.classList.add("hidden");
     return;
   }
 
-  els.status.textContent = `Showing ${data.results.length} result(s)`;
+  els.status.textContent = "";
   els.table.classList.remove("hidden");
   els.pagination.classList.remove("hidden");
-  els.pageLabel.textContent = `Page ${data.page}`;
-  els.prevBtn.disabled = data.page <= 1;
+  els.prevBtn.disabled = !data.has_prev;
   els.nextBtn.disabled = !data.has_next;
+  renderPageNumbers(data.page, data.total_pages);
 
   for (const row of data.results) {
     const tr = document.createElement("tr");
@@ -180,7 +234,7 @@ els.stateSelect.addEventListener("change", () => {
 });
 
 els.prevBtn.addEventListener("click", () => {
-  if (state.page > 1) {
+  if (state.hasPrev) {
     state.page -= 1;
     runSearch();
   }
@@ -191,6 +245,12 @@ els.nextBtn.addEventListener("click", () => {
     state.page += 1;
     runSearch();
   }
+});
+
+els.pageSizeSelect.addEventListener("change", () => {
+  state.pageSize = parseInt(els.pageSizeSelect.value, 10);
+  state.page = 1;
+  if (state.hasSearched) runSearch();
 });
 
 els.closeModal.addEventListener("click", () => els.modal.classList.add("hidden"));

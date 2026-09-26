@@ -25,9 +25,11 @@ load_dotenv()
 logging.basicConfig(level=os.getenv("UDYAM_WEB_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("udyam.webapp")
 
-MAX_PAGE_SIZE = 50
+PAGE_SIZE_OPTIONS = (10, 20, 50, 100)
+MAX_PAGE_SIZE = max(PAGE_SIZE_OPTIONS)
 DEFAULT_PAGE_SIZE = 20
 LOOKUP_CACHE_TTL_SECONDS = 6 * 60 * 60  # states/districts/NIC codes/analytics change only on dbt runs
+COUNT_CACHE_TTL_SECONDS = 5 * 60  # same filter set is re-queried across pages
 
 app = FastAPI(title="Udyam MSME Search API", version="1.0.0")
 
@@ -40,6 +42,7 @@ app.add_middleware(
 )
 
 _lookup_cache = TTLCache(ttl_seconds=LOOKUP_CACHE_TTL_SECONDS)
+_count_cache = TTLCache(ttl_seconds=COUNT_CACHE_TTL_SECONDS)
 
 
 class Enterprise(BaseModel):
@@ -56,7 +59,10 @@ class SearchResponse(BaseModel):
     results: list[Enterprise]
     page: int
     page_size: int
+    total: int
+    total_pages: int
     has_next: bool
+    has_prev: bool
 
 
 class NicCode(BaseModel):
@@ -194,7 +200,7 @@ def search(
     state: Optional[str] = Query(None, max_length=100),
     district: Optional[str] = Query(None, max_length=100),
     nic_code: Optional[str] = Query(None, max_length=10),
-    page: int = Query(1, ge=1, le=500),
+    page: int = Query(1, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
 ):
     if not any([name, state, district, nic_code]):
@@ -202,29 +208,46 @@ def search(
             status_code=400,
             detail="Provide at least one of: name, state, district, nic_code.",
         )
+    if page_size not in PAGE_SIZE_OPTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"page_size must be one of {PAGE_SIZE_OPTIONS}.",
+        )
 
     clauses = ["1=1"]
-    params: dict = {}
+    filter_params: dict = {}
 
     if name:
         clauses.append("e.enterprise_name ILIKE %(name_pattern)s")
-        params["name_pattern"] = f"%{name}%"
+        filter_params["name_pattern"] = f"%{name}%"
     if state:
         clauses.append("e.state_name = %(state)s")
-        params["state"] = state
+        filter_params["state"] = state
     if district:
         clauses.append("e.district_name = %(district)s")
-        params["district"] = district
+        filter_params["district"] = district
     if nic_code:
         clauses.append(
             "e.enterprise_key IN "
             "(SELECT enterprise_key FROM BRIDGE_ENTERPRISE_ACTIVITY WHERE nic_code = %(nic_code)s)"
         )
-        params["nic_code"] = nic_code
+        filter_params["nic_code"] = nic_code
 
+    where_sql = " AND ".join(clauses)
+
+    def compute_count():
+        row = _run_query(f"SELECT COUNT(*) FROM DIM_ENTERPRISE e WHERE {where_sql}", filter_params)
+        return row[0][0]
+
+    try:
+        total = _count_cache.get_or_set((name, state, district, nic_code), compute_count)
+    except Exception:
+        logger.exception("Count query failed")
+        raise HTTPException(status_code=502, detail="Search temporarily unavailable.")
+
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
     offset = (page - 1) * page_size
-    params["limit"] = page_size + 1  # fetch one extra to detect has_next cheaply
-    params["offset"] = offset
 
     sql = f"""
         SELECT
@@ -236,19 +259,16 @@ def search(
             e.pincode,
             e.registration_date
         FROM DIM_ENTERPRISE e
-        WHERE {' AND '.join(clauses)}
+        WHERE {where_sql}
         ORDER BY e.enterprise_name
         LIMIT %(limit)s OFFSET %(offset)s
     """
 
     try:
-        rows = _run_query(sql, params)
+        rows = _run_query(sql, {**filter_params, "limit": page_size, "offset": offset})
     except Exception:
         logger.exception("Search query failed")
         raise HTTPException(status_code=502, detail="Search temporarily unavailable.")
-
-    has_next = len(rows) > page_size
-    rows = rows[:page_size]
 
     results = [
         Enterprise(
@@ -263,7 +283,15 @@ def search(
         for r in rows
     ]
 
-    return SearchResponse(results=results, page=page, page_size=page_size, has_next=has_next)
+    return SearchResponse(
+        results=results,
+        page=page,
+        page_size=page_size,
+        total=total,
+        total_pages=total_pages,
+        has_next=page < total_pages,
+        has_prev=page > 1,
+    )
 
 
 @app.get("/api/enterprise/{enterprise_key}", response_model=EnterpriseDetail)
