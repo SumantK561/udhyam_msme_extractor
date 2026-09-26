@@ -1,6 +1,6 @@
 # Udyam MSME Extractor
 
-**Version 3.2.0**
+**Version 4.0.0**
 
 Production-grade Python pipeline for extracting MSME registered-unit data from the Government of India's Udyam dataset via the `data.gov.in` API. Designed for Supplier.io's supplier intelligence ingestion workflow.
 
@@ -808,6 +808,19 @@ Verifies Python 3.10+, `curl`, required runtime directories, Python compilation,
 ---
 
 ## Version History
+
+### 4.0.0 — Full-scale extraction, Airflow orchestration, and the public search webapp
+
+- **First complete 43M-record extraction** — 44,297,480 records verified end-to-end (RAW → Bronze → Silver → Gold), across all 36 states, run ID `20260918T052252Z_f8050eb1`
+- **Reconciliation growth-aware fix** — `ActualRecords > ExpectedRecords` (new registrations arriving mid-run) now passes with a warning instead of failing the run; only `ActualRecords < ExpectedRecords` is a genuine failure. Fixed at both state-level and run-level reconciliation
+- **Airflow orchestration** (`dags/`) — `udyam_incremental_pipeline` (bi-weekly, extract → load → `dbt run`) and `udyam_full_refresh_pipeline` (manual, `dbt run --full-refresh`); systemd-managed scheduler/webserver on EC2 via `scripts/setup_airflow.sh`; run ID is generated up front and handed from the extract task to the load task through a shared file
+- **Public MSME search webapp** (`webapp/`) — FastAPI backend + static frontend, fully isolated from the ETL pipeline via a dedicated `UDYAM_PUBLIC_READER` role and `UDYAM_PUBLIC_WH` warehouse scoped to `RAW_GOLD` only:
+  - Search by enterprise name, state, district, and NIC code (new `bridge_enterprise_activity` Gold model), with cached total counts, a rows-per-page selector (10/20/50/100), and numbered pagination
+  - Detailed enterprise view — company name, address, state, district, country, MSME flag, registration date, and NIC activities
+  - Analytics dashboard — stat tiles, top-10 states/industries bar charts, registrations-by-year with YoY %, and a monthly registration trend with a 3-month linear-regression forecast (MoM %) — all built as dependency-free SVG charts following a validated, colorblind-safe categorical palette
+  - Dark theme matched to `sumantk.in` (Sora/Inter/JetBrains Mono, navy/blue/violet)
+  - Data-freshness banner reading Snowflake's own `LAST_ALTERED` metadata — no separate tracking needed
+  - Deployed behind nginx + Let's Encrypt with a dedicated rate-limit zone (`scripts/setup_webapp.sh`)
 
 ### 3.2.0 — dbt Bronze / Silver / Gold transformation layer
 
