@@ -1,9 +1,7 @@
 """
 Bi-weekly incremental pipeline: extract new MSME records → Snowflake → dbt.
 
-Schedule: every 14 days from the anchor start_date below (cron has no
-native "every 2 weeks" -- a fixed timedelta interval is the reliable way
-to express it in Airflow).
+Schedule: 1st and 15th of every month at midnight UTC.
 Each run picks up only records added since the previous run (new registrations).
 """
 
@@ -28,7 +26,7 @@ with DAG(
     dag_id="udyam_incremental_pipeline",
     default_args=default_args,
     description="Bi-weekly incremental MSME extraction → Snowflake → dbt",
-    schedule_interval=timedelta(days=14),
+    schedule_interval="0 0 1,15 * *",  # 1st and 15th of every month at midnight UTC
     start_date=datetime(2026, 9, 21),
     catchup=False,
     tags=["udyam", "msme", "incremental"],
@@ -72,4 +70,14 @@ with DAG(
         execution_timeout=timedelta(hours=2),
     )
 
-    extract >> load >> transform
+    docs = BashOperator(
+        task_id="dbt_docs_generate",
+        bash_command=(
+            f"source {VENV} && "
+            f"cd {PROJECT_DIR}/udyam_dbt && "
+            "dbt docs generate"
+        ),
+        execution_timeout=timedelta(minutes=15),
+    )
+
+    extract >> load >> transform >> docs
