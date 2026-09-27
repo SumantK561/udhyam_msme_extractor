@@ -26,7 +26,7 @@ load_dotenv()
 logging.basicConfig(level=os.getenv("UDYAM_WEB_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("udyam.webapp")
 
-PIPELINE_SCHEDULE_DAYS = 14  # must match dags/udyam_incremental_pipeline.py's schedule_interval
+PIPELINE_SCHEDULE_DAYS = 14  # kept for reference; next-scheduled is computed from 1st/15th cadence
 PAGE_SIZE_OPTIONS = (10, 20, 50, 100)
 MAX_PAGE_SIZE = max(PAGE_SIZE_OPTIONS)
 DEFAULT_PAGE_SIZE = 20
@@ -101,6 +101,17 @@ def _linear_forecast(values: list[float], periods_ahead: int) -> list[float]:
     return [max(0.0, intercept + slope * (n - 1 + i)) for i in range(1, periods_ahead + 1)]
 
 
+def _next_schedule_date(last: datetime) -> datetime:
+    """Return the next 1st-or-15th date strictly after `last`."""
+    day = last.day
+    if day < 15:
+        return last.replace(day=15, hour=0, minute=0, second=0, microsecond=0)
+    # on or after 15th → first of next month
+    if last.month == 12:
+        return last.replace(year=last.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return last.replace(month=last.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
 def _next_periods(last_period: str, count: int) -> list[str]:
     """last_period is 'YYYY-MM' -> returns the next `count` 'YYYY-MM' strings."""
     year, month = (int(p) for p in last_period.split("-"))
@@ -170,7 +181,7 @@ def last_updated():
         last = row[0][0] if row else None
         if last is None:
             return {"last_updated": None, "next_scheduled": None}
-        next_scheduled = last + timedelta(days=PIPELINE_SCHEDULE_DAYS)
+        next_scheduled = _next_schedule_date(last)
         return {
             "last_updated": last.strftime("%d-%b-%Y"),
             "next_scheduled": next_scheduled.strftime("%d-%b-%Y"),
