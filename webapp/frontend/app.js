@@ -19,6 +19,8 @@ const els = {
   resultsBar: document.getElementById("results-bar"),
   resultsCount: document.getElementById("results-count"),
   pageSizeSelect: document.getElementById("page-size"),
+  exportCsv: document.getElementById("export-csv"),
+  exportXlsx: document.getElementById("export-xlsx"),
   table: document.getElementById("results-table"),
   tbody: document.getElementById("results-body"),
   pagination: document.getElementById("pagination"),
@@ -76,16 +78,27 @@ async function loadDistricts(stateName) {
   }
 }
 
-function buildSearchParams() {
+function buildFilterParams() {
   const params = new URLSearchParams();
   const name = els.name.value.trim();
   if (name) params.set("name", name);
   if (els.stateSelect.value) params.set("state", els.stateSelect.value);
   if (els.districtSelect.value) params.set("district", els.districtSelect.value);
   if (els.nicSelect.value) params.set("nic_code", els.nicSelect.value);
+  return params;
+}
+
+function buildSearchParams() {
+  const params = buildFilterParams();
   params.set("page", state.page);
   params.set("page_size", state.pageSize);
   return params;
+}
+
+function triggerExport(format) {
+  const params = buildFilterParams();
+  params.set("format", format);
+  window.location.href = `${API_BASE}/search/export?${params.toString()}`;
 }
 
 async function runSearch() {
@@ -272,6 +285,9 @@ els.pageSizeSelect.addEventListener("change", () => {
   state.page = 1;
   if (state.hasSearched) runSearch();
 });
+
+els.exportCsv.addEventListener("click", () => triggerExport("csv"));
+els.exportXlsx.addEventListener("click", () => triggerExport("xlsx"));
 
 els.closeModal.addEventListener("click", () => els.modal.classList.add("hidden"));
 els.modal.addEventListener("click", (e) => {

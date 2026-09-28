@@ -8,6 +8,8 @@ contends with the ETL pipeline's warehouse.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
 from datetime import timedelta
@@ -16,6 +18,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from cache import TTLCache
@@ -27,6 +30,7 @@ logging.basicConfig(level=os.getenv("UDYAM_WEB_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("udyam.webapp")
 
 PIPELINE_SCHEDULE_DAYS = 14  # kept for reference; next-scheduled is computed from 1st/15th cadence
+EXPORT_ROW_LIMIT = 50_000   # max rows allowed in a single export
 PAGE_SIZE_OPTIONS = (10, 20, 50, 100)
 MAX_PAGE_SIZE = max(PAGE_SIZE_OPTIONS)
 DEFAULT_PAGE_SIZE = 20
@@ -396,6 +400,114 @@ def search(
         total_pages=total_pages,
         has_next=page < total_pages,
         has_prev=page > 1,
+    )
+
+
+EXPORT_COLUMNS = [
+    "Enterprise Name", "State", "District", "Pincode",
+    "Address", "Country", "MSME", "Registration Date",
+]
+
+
+def _build_export_rows(filter_params: dict, where_sql: str) -> list[tuple]:
+    sql = f"""
+        SELECT
+            e.enterprise_name,
+            e.state_name,
+            e.district_name,
+            e.pincode,
+            e.communication_address,
+            e.country,
+            e.msme,
+            e.registration_date
+        FROM DIM_ENTERPRISE e
+        WHERE {where_sql}
+        ORDER BY e.enterprise_name
+        LIMIT {EXPORT_ROW_LIMIT}
+    """
+    return _run_query(sql, filter_params)
+
+
+@app.get("/api/search/export")
+def export_search(
+    fmt: str = Query("csv", alias="format", pattern="^(csv|xlsx)$"),
+    name: Optional[str] = Query(None, min_length=2, max_length=200),
+    state: Optional[str] = Query(None, max_length=100),
+    district: Optional[str] = Query(None, max_length=100),
+    nic_code: Optional[str] = Query(None, max_length=10),
+):
+    if not any([name, state, district, nic_code]):
+        raise HTTPException(status_code=400, detail="Provide at least one filter to export.")
+
+    clauses = ["1=1"]
+    filter_params: dict = {}
+
+    if name:
+        clauses.append("e.enterprise_name ILIKE %(name_pattern)s")
+        filter_params["name_pattern"] = f"%{name}%"
+    if state:
+        clauses.append("e.state_name = %(state)s")
+        filter_params["state"] = state
+    if district:
+        clauses.append("e.district_name = %(district)s")
+        filter_params["district"] = district
+    if nic_code:
+        clauses.append(
+            "e.enterprise_key IN "
+            "(SELECT enterprise_key FROM BRIDGE_ENTERPRISE_ACTIVITY WHERE nic_code = %(nic_code)s)"
+        )
+        filter_params["nic_code"] = nic_code
+
+    where_sql = " AND ".join(clauses)
+
+    try:
+        rows = _build_export_rows(filter_params, where_sql)
+    except Exception:
+        logger.exception("Export query failed")
+        raise HTTPException(status_code=502, detail="Export temporarily unavailable.")
+
+    filename_base = "msme_export"
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(EXPORT_COLUMNS)
+        for r in rows:
+            writer.writerow([str(v) if v is not None else "" for v in r])
+        content = buf.getvalue().encode("utf-8-sig")  # UTF-8 BOM for Excel compatibility
+        return Response(
+            content=content,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.csv"'},
+        )
+
+    # xlsx
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "MSME Data"
+
+    header_fill = PatternFill(fill_type="solid", fgColor="1a1d28")
+    header_font = Font(bold=True, color="3c83f6")
+
+    for col_idx, col_name in enumerate(EXPORT_COLUMNS, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+
+    for row_idx, r in enumerate(rows, 2):
+        for col_idx, val in enumerate(r, 1):
+            ws.cell(row=row_idx, column=col_idx, value=str(val) if val is not None else "")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename_base}.xlsx"'},
     )
 
 
