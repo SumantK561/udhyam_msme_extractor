@@ -29,7 +29,7 @@ deduped AS (
     WHERE enterprise_name IS NOT NULL
       AND TRIM(enterprise_name) != ''
       -- must contain at least one letter; filters out digit-only, symbol-only,
-      -- and single-character junk names (e.g. ".", ",", "123", ".....", "   ")
+      -- and whitespace-only names (e.g. ".", ",", "123", ".....", "   ")
       AND REGEXP_LIKE(TRIM(enterprise_name), '.*[A-Za-z].*')
 
 )
