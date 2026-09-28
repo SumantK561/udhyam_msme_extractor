@@ -304,28 +304,42 @@ function renderLineChart(container, points, color, opts = {}) {
   });
 }
 
+function makeTile(t, hero = false) {
+  const tile = document.createElement("div");
+  tile.className = hero ? "stat-tile stat-tile-hero" : "stat-tile";
+  const hasDelta = t.delta !== undefined && t.delta !== null;
+  const deltaClass = hasDelta ? (t.delta >= 0 ? "positive" : "negative") : "";
+  const arrow = hasDelta ? (t.delta >= 0 ? "▲" : "▼") : "";
+  tile.innerHTML = `
+    <div class="stat-label">${t.label}</div>
+    <div class="stat-value ${deltaClass}">${arrow ? `<span class="stat-arrow">${arrow}</span>` : ""}${t.value}</div>
+  `;
+  return tile;
+}
+
 function renderStatTiles(container, stats, momPct, yoyPct) {
   container.innerHTML = "";
-  const tiles = [
-    { label: "Total enterprises", value: fmtCompact(stats.total_enterprises) },
-    { label: "States covered", value: fmtCompact(stats.total_states) },
-    { label: "Districts covered", value: fmtCompact(stats.total_districts) },
-    { label: "Industries (NIC codes)", value: fmtCompact(stats.total_industries) },
-    { label: "Latest month, MoM", value: fmtSigned(momPct) || "—", delta: momPct },
-    { label: "Latest year, YoY", value: fmtSigned(yoyPct) || "—", delta: yoyPct },
+
+  // Hero tile — total enterprises, full width
+  container.appendChild(makeTile(
+    { label: "Total Enterprises", value: fmtFull(stats.total_enterprises) },
+    true
+  ));
+
+  // Secondary row — 5 tiles
+  const row = document.createElement("div");
+  row.className = "stat-tile-row";
+
+  const secondary = [
+    { label: "States covered",       value: fmtCompact(stats.total_states)     },
+    { label: "Districts covered",    value: fmtCompact(stats.total_districts)   },
+    { label: "Industries (NIC)",     value: fmtCompact(stats.total_industries)  },
+    { label: "Month-on-Month",       value: fmtSigned(momPct) || "—", delta: momPct },
+    { label: "Year-on-Year",         value: fmtSigned(yoyPct) || "—", delta: yoyPct },
   ];
-  for (const t of tiles) {
-    const tile = document.createElement("div");
-    tile.className = "stat-tile";
-    const hasDelta = t.delta !== undefined && t.delta !== null;
-    const deltaClass = hasDelta ? (t.delta >= 0 ? "positive" : "negative") : "";
-    const arrow = hasDelta ? (t.delta >= 0 ? "▲" : "▼") : "";
-    tile.innerHTML = `
-      <div class="stat-label">${t.label}</div>
-      <div class="stat-value ${deltaClass}">${arrow ? `<span class="stat-arrow">${arrow}</span>` : ""}${t.value}</div>
-    `;
-    container.appendChild(tile);
-  }
+
+  for (const t of secondary) row.appendChild(makeTile(t));
+  container.appendChild(row);
 }
 
 async function loadAnalytics() {
