@@ -58,14 +58,21 @@
 
       <div id="results-bar" class="results-bar hidden">
         <span id="results-count"></span>
-        <div class="field page-size-field">
-          <label for="page-size">Rows per page</label>
-          <select id="page-size">
-            <option value="10">10</option>
-            <option value="20" selected>20</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-          </select>
+        <div class="results-bar-right">
+          <div class="field page-size-field">
+            <label for="page-size">Rows per page</label>
+            <select id="page-size">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </div>
+          <div class="export-group">
+            <span class="export-label">Export</span>
+            <button id="export-csv" class="export-btn" title="Download CSV">CSV</button>
+            <button id="export-xlsx" class="export-btn" title="Download XLSX">XLSX</button>
+          </div>
         </div>
       </div>
 

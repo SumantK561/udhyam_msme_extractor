@@ -225,6 +225,42 @@ button:disabled {
   justify-content: space-between;
   margin-top: 1.1rem;
   gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.results-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.export-group {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.export-label {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.export-btn {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.export-btn:hover {
+  color: var(--primary);
+  border-color: var(--primary);
 }
 
 #results-count {
