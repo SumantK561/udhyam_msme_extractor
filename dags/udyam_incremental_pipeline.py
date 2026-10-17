@@ -46,7 +46,7 @@ with DAG(
             "export UDYAM_RUN_ID=$(cat /tmp/udyam_run_id.txt) && "
             "python3 run_udyam.py"
         ),
-        execution_timeout=timedelta(hours=10),
+        execution_timeout=timedelta(hours=48),
     )
 
     load = BashOperator(
@@ -57,7 +57,7 @@ with DAG(
             "export UDYAM_RUN_ID=$(cat /tmp/udyam_run_id.txt) && "
             "python3 scripts/load_to_snowflake.py"
         ),
-        execution_timeout=timedelta(hours=3),
+        execution_timeout=timedelta(hours=10),
     )
 
     transform = BashOperator(
@@ -67,7 +67,7 @@ with DAG(
             f"cd {PROJECT_DIR}/udyam_dbt && "
             "dbt run"
         ),
-        execution_timeout=timedelta(hours=2),
+        execution_timeout=timedelta(hours=10),
     )
 
     docs = BashOperator(
@@ -77,7 +77,7 @@ with DAG(
             f"cd {PROJECT_DIR}/udyam_dbt && "
             "dbt docs generate"
         ),
-        execution_timeout=timedelta(minutes=15),
+        execution_timeout=timedelta(hours=2),
     )
 
     extract >> load >> transform >> docs
