@@ -46,7 +46,7 @@ with DAG(
             "export UDYAM_RUN_ID=$(cat /tmp/udyam_run_id.txt) && "
             "python3 run_udyam.py"
         ),
-        execution_timeout=timedelta(hours=10),
+        execution_timeout=timedelta(hours=48),
     )
 
     load = BashOperator(
