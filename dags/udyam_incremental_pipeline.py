@@ -7,13 +7,19 @@ Each run picks up only records added since the previous run (new registrations).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from airflow import DAG
+from airflow.models import Variable
 from airflow.operators.bash import BashOperator
+from airflow.operators.python import PythonOperator
 
 PROJECT_DIR = "/home/ubuntu/udhyam_msme_extractor"
 VENV = f"{PROJECT_DIR}/.venv/bin/activate"
+ACTIVE_RUN_ID_VARIABLE = "udyam_incremental_active_run_id"
+LOGGER = logging.getLogger(__name__)
 
 default_args = {
     "owner": "udyam",
@@ -22,6 +28,40 @@ default_args = {
     "email_on_failure": False,
 }
 
+
+def get_or_create_run_id() -> str:
+    """Reuse the active extraction ID, or persist a new one for this pipeline."""
+    run_id = Variable.get(ACTIVE_RUN_ID_VARIABLE, default_var=None)
+    if run_id:
+        LOGGER.info("Reusing active Udyam run ID: %s", run_id)
+        return run_id
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = f"{timestamp}_{uuid4().hex[:8]}"
+    Variable.set(ACTIVE_RUN_ID_VARIABLE, run_id)
+    LOGGER.info("Created active Udyam run ID: %s", run_id)
+    return run_id
+
+
+def clear_run_id_after_success(ti) -> None:
+    """Clear the active ID only after every pipeline stage has succeeded."""
+    run_id = ti.xcom_pull(task_ids="get_or_create_run_id")
+    if not run_id:
+        raise RuntimeError("Could not retrieve the active Udyam run ID from XCom")
+
+    active_run_id = Variable.get(ACTIVE_RUN_ID_VARIABLE, default_var=None)
+    if active_run_id is None:
+        return
+    if active_run_id != run_id:
+        raise RuntimeError(
+            "Refusing to clear a different active Udyam run ID: "
+            f"expected {run_id}, found {active_run_id}"
+        )
+
+    Variable.delete(ACTIVE_RUN_ID_VARIABLE)
+    LOGGER.info("Cleared completed Udyam run ID: %s", run_id)
+
+
 with DAG(
     dag_id="udyam_incremental_pipeline",
     default_args=default_args,
@@ -29,21 +69,21 @@ with DAG(
     schedule_interval="0 0 1,15 * *",  # 1st and 15th of every month at midnight UTC
     start_date=datetime(2026, 9, 21),
     catchup=False,
+    max_active_runs=1,
     tags=["udyam", "msme", "incremental"],
 ) as dag:
+
+    get_run_id = PythonOperator(
+        task_id="get_or_create_run_id",
+        python_callable=get_or_create_run_id,
+    )
 
     extract = BashOperator(
         task_id="extract",
         bash_command=(
             f"source {VENV} && "
             f"cd {PROJECT_DIR} && "
-            "python3 -c \""
-            "from udyam_extractor import get_run_id; "
-            "rid = get_run_id(); "
-            "open('/tmp/udyam_run_id.txt', 'w').write(rid); "
-            "print('RUN_ID:', rid)"
-            "\" && "
-            "export UDYAM_RUN_ID=$(cat /tmp/udyam_run_id.txt) && "
+            "export UDYAM_RUN_ID='{{ ti.xcom_pull(task_ids=\"get_or_create_run_id\") }}' && "
             "python3 run_udyam.py"
         ),
         execution_timeout=timedelta(hours=48),
@@ -54,7 +94,7 @@ with DAG(
         bash_command=(
             f"source {VENV} && "
             f"cd {PROJECT_DIR} && "
-            "export UDYAM_RUN_ID=$(cat /tmp/udyam_run_id.txt) && "
+            "export UDYAM_RUN_ID='{{ ti.xcom_pull(task_ids=\"get_or_create_run_id\") }}' && "
             "python3 scripts/load_to_snowflake.py"
         ),
         execution_timeout=timedelta(hours=10),
@@ -80,4 +120,9 @@ with DAG(
         execution_timeout=timedelta(hours=2),
     )
 
-    extract >> load >> transform >> docs
+    clear_run_id = PythonOperator(
+        task_id="clear_run_id_after_success",
+        python_callable=clear_run_id_after_success,
+    )
+
+    get_run_id >> extract >> load >> transform >> docs >> clear_run_id

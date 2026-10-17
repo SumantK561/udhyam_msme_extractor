@@ -660,13 +660,25 @@ Two DAGs live in `dags/`. Airflow runs in a dedicated virtualenv (`~/airflow-ven
 | `udyam_incremental_pipeline` | Bi-weekly (every 14 days) | Extract new records → load → `dbt run` |
 | `udyam_full_refresh_pipeline` | Manual only | Extract all 36 states → load → `dbt run --full-refresh` |
 
-Both DAGs share the same three-task structure:
+The full-refresh DAG runs extraction, loading, and full-refresh dbt. The
+incremental DAG runs:
 
 ```
-extract → load_to_snowflake → dbt_run
+get_or_create_run_id → extract → load_to_snowflake → dbt_run
+    → dbt_docs_generate → clear_run_id_after_success
 ```
 
-Each task calls the same scripts already in the repo using `BashOperator`.
+Extraction, loading, and dbt tasks call the existing scripts using
+`BashOperator`.
+
+The incremental DAG stores its active extraction ID in the Airflow Variable
+`udyam_incremental_active_run_id`. Retries and later DAG runs reuse that ID
+until extraction, Snowflake loading, dbt, and docs generation all succeed. The
+DAG is limited to one active run so two executions cannot claim the same ID.
+The final task clears the Variable only after all upstream stages succeed.
+Keep the extractor's `checkpoints/<run_id>` and `output/<run_id>` files
+persistent across retries; if a run exhausts its retries, trigger the DAG again
+to continue with the same ID.
 
 ### Setup (one-time, on EC2)
 
