@@ -593,6 +593,21 @@ def batch_output_path(
     return batch_dir / f"{batch_id}.csv"
 
 
+def cleanup_published_staged_batch(
+    batch_file: Path,
+    logger,
+) -> None:
+    """Remove a local staging copy after its cloud upload is verified."""
+    try:
+        batch_file.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "STAGING FILE CLEANUP FAILED | File=%s | Error=%s",
+            batch_file,
+            exc,
+        )
+
+
 def load_checkpoint(
     run_id,
     state,
@@ -1509,12 +1524,9 @@ def extract_state(
                 stage="RAW_PERSISTENCE",
                 detail=str(exc),
             )
-        finally:
-            if SETTINGS.storage_backend == "gcs":
-                try:
-                    batch_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
+
+        if SETTINGS.storage_backend in {"s3", "gcs"}:
+            cleanup_published_staged_batch(batch_file, logger)
 
         # -------------------------------------------------------------------
         # Update counters
