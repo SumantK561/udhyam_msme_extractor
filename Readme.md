@@ -304,6 +304,9 @@ Runtime configuration is centralized in `config.py` and supplied through environ
 ## S3 RAW Storage
 
 The extractor publishes each completed batch directly to Amazon S3. Credentials resolve via the standard AWS chain (environment variables, shared config, or IAM role/task role).
+After S3 confirms the upload and checksum, the extractor removes the local
+staging copy to avoid consuming root-disk space. If publication fails, it
+retains the staging file for investigation or recovery.
 
 ```env
 UDYAM_STORAGE_BACKEND=s3

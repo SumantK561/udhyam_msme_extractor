@@ -97,7 +97,7 @@ with DAG(
             "export UDYAM_RUN_ID='{{ ti.xcom_pull(task_ids=\"get_or_create_run_id\") }}' && "
             "python3 scripts/load_to_snowflake.py"
         ),
-        execution_timeout=timedelta(hours=10),
+        execution_timeout=timedelta(hours=48),
     )
 
     transform = BashOperator(
@@ -107,7 +107,7 @@ with DAG(
             f"cd {PROJECT_DIR}/udyam_dbt && "
             "dbt run"
         ),
-        execution_timeout=timedelta(hours=10),
+        execution_timeout=timedelta(hours=48),
     )
 
     docs = BashOperator(

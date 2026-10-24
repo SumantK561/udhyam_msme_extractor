@@ -43,6 +43,32 @@ def test_sha256(tmp_path):
     )
 
 
+def test_published_cloud_batch_staging_file_is_removed(tmp_path):
+    path = tmp_path / "batch.csv"
+    path.write_bytes(b"batch")
+    logger = FakeLogger()
+
+    extractor.cleanup_published_staged_batch(path, logger)
+
+    assert not path.exists()
+    assert logger.messages == []
+
+
+def test_staging_cleanup_failure_is_logged(tmp_path, monkeypatch):
+    path = tmp_path / "batch.csv"
+    path.write_bytes(b"batch")
+    logger = FakeLogger()
+
+    def fail_unlink(*args, **kwargs):
+        raise OSError("disk error")
+
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+    extractor.cleanup_published_staged_batch(path, logger)
+
+    assert logger.messages[0][0] == "WARNING"
+    assert "STAGING FILE CLEANUP FAILED" in logger.messages[0][1][0]
+
+
 def test_configuration_defaults(monkeypatch):
     # Patch load_dotenv so a local .env file cannot bleed into this test.
     monkeypatch.setattr("config.load_dotenv", lambda: None)
