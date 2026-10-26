@@ -100,6 +100,7 @@ def test_configuration_validation(monkeypatch):
 
 def test_short_page_is_retried(monkeypatch):
     logger = FakeLogger()
+    monkeypatch.setattr(extractor, "BATCH_SIZE", 10000)
     responses = [
         {"status": "ok", "count": 9998, "total": 100000, "records": [{}] * 9998},
         {"status": "ok", "count": 10000, "total": 100000, "records": [{}] * 10000},
