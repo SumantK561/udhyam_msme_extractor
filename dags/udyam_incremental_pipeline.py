@@ -89,6 +89,17 @@ with DAG(
         execution_timeout=timedelta(hours=48),
     )
 
+    compact = BashOperator(
+        task_id="compact_batches",
+        bash_command=(
+            f"source {VENV} && "
+            f"cd {PROJECT_DIR} && "
+            "export UDYAM_RUN_ID='{{ ti.xcom_pull(task_ids=\"get_or_create_run_id\") }}' && "
+            "python3 scripts/compact_batches.py"
+        ),
+        execution_timeout=timedelta(hours=12),
+    )
+
     load = BashOperator(
         task_id="load_to_snowflake",
         bash_command=(
@@ -125,4 +136,4 @@ with DAG(
         python_callable=clear_run_id_after_success,
     )
 
-    get_run_id >> extract >> load >> transform >> docs >> clear_run_id
+    get_run_id >> extract >> compact >> load >> transform >> docs >> clear_run_id

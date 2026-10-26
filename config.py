@@ -52,6 +52,7 @@ class Settings:
     max_retries: int
     connect_timeout: int
     max_request_time: int
+    compaction_max_rows: int
     retry_backoff_base: float
     retry_backoff_max: float
     retry_jitter: float
@@ -79,6 +80,7 @@ def load_settings() -> Settings:
         max_retries=_get_int("UDYAM_MAX_RETRIES", 5),
         connect_timeout=_get_int("UDYAM_CONNECT_TIMEOUT", 30),
         max_request_time=_get_int("UDYAM_MAX_REQUEST_TIME", 300),
+        compaction_max_rows=_get_int("UDYAM_COMPACTION_MAX_ROWS", 100000),
         retry_backoff_base=_get_float("UDYAM_RETRY_BACKOFF_BASE", 5.0),
         retry_backoff_max=_get_float("UDYAM_RETRY_BACKOFF_MAX", 60.0),
         retry_jitter=_get_float("UDYAM_RETRY_JITTER", 3.0),
