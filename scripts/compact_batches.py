@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+# Direct script execution puts scripts/ rather than the repository root on
+# sys.path. Add the root so shared top-level modules resolve on Airflow hosts.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from udyam_extractor import (
     CSV_HEADERS,
     OUTPUT_ROOT,
