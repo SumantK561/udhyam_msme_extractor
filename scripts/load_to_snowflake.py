@@ -27,7 +27,6 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-import snowflake.connector
 from dotenv import load_dotenv
 
 
@@ -147,6 +146,7 @@ def sql_string(value: str) -> str:
 
 def create_connection(settings: Settings):
     """Create a Snowflake connection using configured authentication."""
+    import snowflake.connector
 
     LOGGER.info(
         "Connecting to Snowflake account=%s role=%s warehouse=%s "
@@ -196,51 +196,47 @@ def load_manifest(
             "accidental cross-run ingestion."
         )
 
-    pattern = (
-        rf".*run_id={re.escape(settings.run_id)}/manifest\.jsonl$"
-    )
-
     stage_name = quote_identifier(settings.stage)
 
-    sql = f"""
-        SELECT $1
-        FROM @{stage_name}
-        (
-            FILE_FORMAT => 'UDYAM_JSON_FORMAT',
-            PATTERN => {sql_string(pattern)}
-        )
-    """
-
     LOGGER.info(
-        "Reading manifest from stage=%s run_id=%s",
+        "Reading compaction manifest from stage=%s run_id=%s",
         settings.stage,
         settings.run_id,
     )
 
-    cursor.execute(sql)
-
-    records: list[dict[str, Any]] = []
-
-    for row in cursor.fetchall():
-        value = row[0]
-
-        if isinstance(value, str):
-            value = json.loads(value)
-
-        if not isinstance(value, dict):
-            raise LoaderError(
-                "Unexpected manifest record type: "
-                f"{type(value).__name__}"
-            )
-
-        records.append(value)
-
-    if not records:
-        raise LoaderError(
-            "No manifest records found for the requested run."
+    for filename in ("compaction_manifest.jsonl", "manifest.jsonl"):
+        pattern = (
+            rf".*run_id={re.escape(settings.run_id)}/{re.escape(filename)}$"
         )
+        sql = f"""
+            SELECT $1
+            FROM @{stage_name}
+            (
+                FILE_FORMAT => 'UDYAM_JSON_FORMAT',
+                PATTERN => {sql_string(pattern)}
+            )
+        """
+        cursor.execute(sql)
+        records: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            value = row[0]
+            if isinstance(value, str):
+                value = json.loads(value)
+            if not isinstance(value, dict):
+                raise LoaderError(
+                    "Unexpected manifest record type: "
+                    f"{type(value).__name__}"
+                )
+            records.append(value)
+        if records:
+            LOGGER.info(
+                "Using %s with %d records",
+                filename,
+                len(records),
+            )
+            return records
 
-    return records
+    raise LoaderError("No manifest records found for the requested run.")
 
 
 def get_batch_status(
@@ -570,6 +566,417 @@ def update_batch_ledger(
     cursor.execute(sql, values)
 
 
+def get_batch_statuses(
+    cursor,
+    settings: Settings,
+    batch_ids: list[str],
+) -> dict[str, tuple[str | None, int | None, int | None, str | None]]:
+    if not batch_ids:
+        return {}
+    table = qualified_name(
+        settings.database,
+        settings.schema,
+        settings.ingestion_batch_table,
+    )
+    placeholders = ", ".join("%s" for _ in batch_ids)
+    cursor.execute(
+        f"""
+            SELECT BATCH_ID, LOAD_STATUS, EXPECTED_ROWS, LOADED_ROWS, CHECKSUM
+            FROM {table}
+            WHERE BATCH_ID IN ({placeholders})
+        """,
+        tuple(batch_ids),
+    )
+    return {
+        str(row[0]): (row[1], row[2], row[3], row[4])
+        for row in cursor.fetchall()
+    }
+
+
+def get_raw_batch_counts(
+    cursor,
+    settings: Settings,
+    run_id: str,
+    batch_ids: list[str],
+) -> dict[str, tuple[int, int, str | None, int | None, int]]:
+    if not batch_ids:
+        return {}
+    table = qualified_name(
+        settings.database,
+        settings.schema,
+        settings.raw_table,
+    )
+    placeholders = ", ".join("%s" for _ in batch_ids)
+    cursor.execute(
+        f"""
+            SELECT
+                _BATCH_ID,
+                COUNT(*),
+                COUNT(DISTINCT _SOURCE_FILE),
+                MIN(_SOURCE_FILE),
+                MIN(_SOURCE_OFFSET),
+                COUNT(DISTINCT _SOURCE_OFFSET)
+            FROM {table}
+            WHERE _RUN_ID = %s
+              AND _BATCH_ID IN ({placeholders})
+            GROUP BY _BATCH_ID
+        """,
+        (run_id, *batch_ids),
+    )
+    return {
+        str(row[0]): (int(row[1]), int(row[2]), row[3], row[4], int(row[5]))
+        for row in cursor.fetchall()
+    }
+
+
+def update_batch_ledger_many(
+    cursor,
+    settings: Settings,
+    run_id: str,
+    state: str,
+    batches: list[dict[str, Any]],
+    *,
+    status: str,
+    loaded_by_id: dict[str, int],
+    error_message: str | None = None,
+) -> None:
+    if not batches:
+        return
+    table = qualified_name(
+        settings.database,
+        settings.schema,
+        settings.ingestion_batch_table,
+    )
+    rows = []
+    values: list[Any] = []
+    for batch in batches:
+        batch_id = str(batch["batch_id"])
+        rows.append(
+            "SELECT %s AS RUN_ID, %s AS BATCH_ID, %s AS STATE, "
+            "%s AS SOURCE_FILE, %s AS SOURCE_OFFSET, "
+            "%s AS EXPECTED_ROWS, %s AS LOADED_ROWS, %s AS CHECKSUM, "
+            "%s AS LOAD_STATUS, CURRENT_TIMESTAMP() AS LOADED_AT, "
+            "%s AS ERROR_MESSAGE"
+        )
+        values.extend(
+            [
+                run_id,
+                batch_id,
+                state,
+                str(batch.get("source_uri", batch.get("source_file", ""))),
+                int(batch["offset"]),
+                int(batch["record_count"]),
+                int(loaded_by_id.get(batch_id, 0)),
+                str(batch["checksum"]),
+                status,
+                error_message,
+            ]
+        )
+    source_sql = "\nUNION ALL\n".join(rows)
+    cursor.execute(
+        f"""
+            MERGE INTO {table} target
+            USING ({source_sql}) source
+              ON target.BATCH_ID = source.BATCH_ID
+            WHEN MATCHED THEN UPDATE SET
+                RUN_ID = source.RUN_ID,
+                STATE = source.STATE,
+                SOURCE_FILE = source.SOURCE_FILE,
+                SOURCE_OFFSET = source.SOURCE_OFFSET,
+                EXPECTED_ROWS = source.EXPECTED_ROWS,
+                LOADED_ROWS = source.LOADED_ROWS,
+                CHECKSUM = source.CHECKSUM,
+                LOAD_STATUS = source.LOAD_STATUS,
+                LOADED_AT = source.LOADED_AT,
+                ERROR_MESSAGE = source.ERROR_MESSAGE
+            WHEN NOT MATCHED THEN INSERT (
+                RUN_ID, BATCH_ID, STATE, SOURCE_FILE, SOURCE_OFFSET,
+                EXPECTED_ROWS, LOADED_ROWS, CHECKSUM, LOAD_STATUS,
+                LOADED_AT, ERROR_MESSAGE
+            ) VALUES (
+                source.RUN_ID, source.BATCH_ID, source.STATE,
+                source.SOURCE_FILE, source.SOURCE_OFFSET,
+                source.EXPECTED_ROWS, source.LOADED_ROWS,
+                source.CHECKSUM, source.LOAD_STATUS,
+                source.LOADED_AT, source.ERROR_MESSAGE
+            )
+        """,
+        tuple(values),
+    )
+
+
+def _stage_relative_path(batch_file: str) -> str:
+    if not batch_file.startswith(("s3://", "gs://")):
+        raise LoaderError(f"Unsupported batch_file URI scheme: {batch_file}")
+    marker = "/udyam/raw/"
+    if marker not in batch_file:
+        raise LoaderError(
+            "Batch file is outside the expected Udyam RAW prefix: "
+            f"{batch_file}"
+        )
+    relative_path = batch_file.split(marker, 1)[1]
+    if not relative_path:
+        raise LoaderError(f"Could not derive stage-relative path from: {batch_file}")
+    return relative_path
+
+
+def copy_compacted_file(
+    cursor,
+    settings: Settings,
+    compact_record: dict[str, Any],
+    batches_to_load: list[dict[str, Any]],
+) -> None:
+    """Load the not-yet-present source batches from one compacted CSV."""
+    if not batches_to_load:
+        return
+    run_id = str(compact_record["run_id"])
+    state = str(compact_record["state"])
+    relative_path = _stage_relative_path(str(compact_record["batch_file"]))
+    batch_ids = [str(batch["batch_id"]) for batch in batches_to_load]
+    placeholders = ", ".join("%s" for _ in batch_ids)
+    pattern = rf".*{re.escape(relative_path)}$"
+    raw_table = qualified_name(
+        settings.database,
+        settings.schema,
+        settings.raw_table,
+    )
+    stage_name = quote_identifier(settings.stage)
+    sql = f"""
+        COPY INTO {raw_table}
+        (
+            LG_ST_CODE,
+            STATE,
+            LG_DT_CODE,
+            DISTRICT,
+            PINCODE,
+            REGISTRATION_DATE,
+            ENTERPRISE_NAME,
+            COMMUNICATION_ADDRESS,
+            ACTIVITIES,
+            _RUN_ID,
+            _STATE,
+            _BATCH_ID,
+            _SOURCE_FILE,
+            _SOURCE_OFFSET,
+            _INGESTED_AT
+        )
+        FROM (
+            SELECT
+                t.$1, t.$2, t.$3, t.$4, t.$5, t.$6, t.$7, t.$8, t.$9,
+                {sql_string(run_id)},
+                {sql_string(state)},
+                t.$10,
+                t.$11,
+                t.$12,
+                CURRENT_TIMESTAMP()
+            FROM @{stage_name}
+            (
+                FILE_FORMAT => 'UDYAM_CSV_FORMAT',
+                PATTERN => {sql_string(pattern)}
+            ) t
+            WHERE t.$10 IN ({placeholders})
+        )
+    """
+    LOGGER.info(
+        "COPY compact_file=%s state=%s batches=%d rows=%d",
+        compact_record["batch_file"],
+        state,
+        len(batches_to_load),
+        sum(int(batch["record_count"]) for batch in batches_to_load),
+    )
+    cursor.execute(sql, tuple(batch_ids))
+    results = cursor.fetchall()
+    for result in results:
+        LOGGER.info("COPY compact result: %s", result)
+
+
+def process_compacted_file(
+    cursor,
+    settings: Settings,
+    compact_record: dict[str, Any],
+) -> tuple[int, int]:
+    run_id = str(compact_record.get("run_id", ""))
+    state = str(compact_record.get("state", ""))
+    batches = compact_record.get("batches")
+    if run_id != settings.run_id or not state or not isinstance(batches, list) or not batches:
+        raise LoaderError("Invalid compacted-file manifest record")
+    expected_file_rows = int(compact_record.get("record_count", -1))
+    if expected_file_rows != sum(int(batch["record_count"]) for batch in batches):
+        raise LoaderError(
+            f"Compacted-file row count mismatch: {compact_record.get('batch_file')}"
+        )
+    if not compact_record.get("checksum"):
+        raise LoaderError(
+            f"Missing compacted-file checksum: {compact_record.get('batch_file')}"
+        )
+    compacted_path = _stage_relative_path(str(compact_record["batch_file"]))
+    expected_compacted_prefix = f"run_id={run_id}/state={state}/batches/"
+    if not compacted_path.startswith(expected_compacted_prefix):
+        raise LoaderError(
+            f"Compacted file is outside its run/state path: "
+            f"{compact_record['batch_file']}"
+        )
+
+    seen_ids: set[str] = set()
+    for batch in batches:
+        required = ("batch_id", "offset", "record_count", "checksum", "source_file")
+        if any(field not in batch for field in required):
+            raise LoaderError("Compacted manifest contains an incomplete batch entry")
+        batch_id = str(batch["batch_id"])
+        if batch_id in seen_ids:
+            raise LoaderError(f"Duplicate batch in compact manifest: {batch_id}")
+        seen_ids.add(batch_id)
+        offset = int(batch["offset"])
+        if (
+            batch_id != f"{run_id}_{state}_{offset}"
+            or offset < 0
+            or int(batch["record_count"]) <= 0
+            or not batch["checksum"]
+        ):
+            raise LoaderError(f"Invalid compacted batch metadata: {batch_id}")
+        expected_source_prefix = (
+            f"udyam/raw/run_id={run_id}/state={state}/batches/"
+        )
+        if not str(batch["source_file"]).startswith(expected_source_prefix):
+            raise LoaderError(
+                f"Invalid source file path for compacted batch {batch_id}"
+            )
+
+    statuses = get_batch_statuses(cursor, settings, list(seen_ids))
+    loaded_by_id: dict[str, int] = {}
+    for batch in batches:
+        batch_id = str(batch["batch_id"])
+        ledger = statuses.get(batch_id)
+        if ledger and ledger[0] == "LOADED":
+            if (
+                ledger[1] is None
+                or int(ledger[1]) != int(batch["record_count"])
+                or ledger[3] != batch["checksum"]
+                or ledger[2] is None
+                or int(ledger[2]) != int(batch["record_count"])
+            ):
+                raise LoaderError(
+                    f"Existing LOADED ledger record does not match compact "
+                    f"manifest for batch {batch_id}"
+                )
+        if ledger and ledger[0] == "LOADING":
+            LOGGER.warning(
+                "Reconciling LOADING batch against RAW rows: %s",
+                batch_id,
+            )
+
+    raw_rows = get_raw_batch_counts(
+        cursor,
+        settings,
+        run_id,
+        list(seen_ids),
+    )
+    batches_to_load = []
+    for batch in batches:
+        batch_id = str(batch["batch_id"])
+        expected = int(batch["record_count"])
+        raw = raw_rows.get(batch_id)
+        if raw is None:
+            if statuses.get(batch_id, (None, None, None, None))[0] == "LOADED":
+                raise LoaderError(
+                    f"Batch {batch_id} is marked LOADED but has no matching RAW rows"
+                )
+            if statuses.get(batch_id, (None, None, None, None))[0] == "LOADING":
+                raise LoaderError(
+                    f"Batch {batch_id} is LOADING with no RAW rows; "
+                    "investigate before retrying"
+                )
+            batches_to_load.append(batch)
+            continue
+        count, source_count, source_file, offset, offset_count = raw
+        if (
+            count != expected
+            or source_count != 1
+            or source_file != batch["source_file"]
+            or offset_count != 1
+            or int(offset) != int(batch["offset"])
+        ):
+            raise LoaderError(
+                f"Existing RAW rows do not reconcile for batch {batch_id}: "
+                f"expected={expected}, actual={count}, source_file={source_file}"
+            )
+        loaded_by_id[batch_id] = count
+
+    try:
+        copy_compacted_file(
+            cursor,
+            settings,
+            compact_record,
+            batches_to_load,
+        )
+        raw_rows = get_raw_batch_counts(
+            cursor,
+            settings,
+            run_id,
+            list(seen_ids),
+        )
+        for batch in batches:
+            batch_id = str(batch["batch_id"])
+            raw = raw_rows.get(batch_id)
+            expected = int(batch["record_count"])
+            if raw is None or (
+                raw[0] != expected
+                or raw[1] != 1
+                or raw[2] != batch["source_file"]
+                or raw[3] is None
+                or int(raw[3]) != int(batch["offset"])
+                or raw[4] != 1
+            ):
+                raise LoaderError(
+                    f"RAW reconciliation failed for compacted batch "
+                    f"{batch_id}: expected={expected}, actual={raw}"
+                )
+            loaded_by_id[batch_id] = expected
+
+        update_batch_ledger_many(
+            cursor,
+            settings,
+            run_id,
+            state,
+            batches,
+            status="LOADED",
+            loaded_by_id=loaded_by_id,
+        )
+        cursor.connection.commit()
+    except Exception as exc:
+        cursor.connection.rollback()
+        pending = [batch for batch in batches if batch in batches_to_load]
+        if pending:
+            try:
+                update_batch_ledger_many(
+                    cursor,
+                    settings,
+                    run_id,
+                    state,
+                    pending,
+                    status="FAILED",
+                    loaded_by_id={},
+                    error_message=str(exc)[:5000],
+                )
+                cursor.connection.commit()
+            except Exception:
+                cursor.connection.rollback()
+                LOGGER.exception("Failed to record compacted-file load failure")
+        raise
+
+    loaded_rows = sum(int(batch["record_count"]) for batch in batches_to_load)
+    skipped_rows = expected_file_rows - loaded_rows
+    LOGGER.info(
+        "COMPACTED FILE COMPLETE | State=%s | File=%s | LoadedRows=%d | "
+        "ReconciledRows=%d",
+        state,
+        compact_record["batch_file"],
+        loaded_rows,
+        skipped_rows,
+    )
+    return loaded_rows, skipped_rows
+
+
 def process_run(
     cursor,
     settings: Settings,
@@ -582,6 +989,35 @@ def process_run(
         cursor,
         settings,
     )
+
+    if manifest and any(
+        "batches" in record or record.get("record_type") == "compacted_file"
+        for record in manifest
+    ):
+        if not all("batches" in record for record in manifest):
+            raise LoaderError("Compaction manifest contains mixed record types")
+        total_loaded = 0
+        total_reconciled = 0
+        manifest.sort(
+            key=lambda item: (
+                str(item.get("state", "")),
+                str(item.get("batch_file", "")),
+            )
+        )
+        for compact_record in manifest:
+            loaded, reconciled = process_compacted_file(
+                cursor,
+                settings,
+                compact_record,
+            )
+            total_loaded += loaded
+            total_reconciled += reconciled
+        LOGGER.info(
+            "Compacted run complete: loaded_rows=%d reconciled_existing_rows=%d",
+            total_loaded,
+            total_reconciled,
+        )
+        return total_loaded
 
     success_batches = [
         record

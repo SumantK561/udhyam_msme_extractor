@@ -8,7 +8,7 @@ Production-grade Python pipeline for extracting MSME registered-unit data from t
 
 ## What It Does
 
-Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian state at a time, with parallel state workers. Each API page (10,000 records) is atomically persisted as an individual CSV artifact. Completed batches are published directly to Amazon S3 or Google Cloud Storage. An idempotent Snowflake loader reads from the cloud stage and loads into the RAW layer with full row-count reconciliation and a per-batch idempotency ledger.
+Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian state at a time, with parallel state workers. Each API page is atomically persisted as an individual CSV artifact and published directly to Amazon S3 or Google Cloud Storage. Before Snowflake loading, a compaction task combines small batch files into bounded per-state CSVs while retaining each row's original batch lineage. The Snowflake loader bulk-loads those files with row-count reconciliation and the existing per-batch idempotency ledger.
 
 **Source dataset:** [List of MSME Registered Units under UDYAM](https://www.data.gov.in/)
 **Publisher:** Ministry of Micro, Small and Medium Enterprises, Government of India
@@ -47,7 +47,8 @@ Retrieves all 43M+ MSME records from the Udyam portal, processing one Indian sta
 - EC2 Linux deployment (Ubuntu 24.04, t3.micro) with virtualenv and screen-based long runs
 - Multi-cloud RAW storage backend: **Amazon S3** and Google Cloud Storage
 - Object metadata carries the extractor SHA-256 for remote artifact validation
-- Idempotent **Snowflake RAW loader** with per-batch ledger, row-count reconciliation, and fail-closed LOADING guard
+- Bounded post-extraction file compaction before Snowflake COPY, preserving original row and batch lineage
+- Idempotent **Snowflake RAW loader** with per-batch ledger, row-count reconciliation, and fail-closed handling for ambiguous batches
 - Snowflake connected to S3 via Storage Integration (no long-lived AWS keys in Snowflake)
 - Least-privilege IAM policy for the extractor service account (`s3:PutObject`, `s3:GetObject` scoped to prefix)
 - **dbt Bronze / Silver / Gold transformation layer** with 7 models, 45 data tests, and MD5 surrogate keys
@@ -74,6 +75,9 @@ Python Extraction Service   ◄── Airflow (orchestration, retries, schedulin
         ▼
   Amazon S3 RAW
   (CSV batch artifacts)
+        │
+        ▼
+Bounded compaction (per state)
         │
         ▼
    Snowflake RAW             ◄── Idempotent loader (scripts/load_to_snowflake.py)
@@ -156,6 +160,7 @@ Udyam_MSME/
 │       ├── msme-ratelimit.conf     # nginx rate-limit zone
 │       └── msme.sumantk.in.conf    # nginx site config
 ├── scripts/
+│   ├── compact_batches.py    # Combine small extraction batches into bounded state files
 │   ├── load_to_snowflake.py  # Idempotent S3 → Snowflake RAW loader
 │   ├── setup_airflow.sh      # One-shot Airflow install + systemd setup for EC2
 │   ├── setup_webapp.sh       # One-shot public webapp install + nginx + SSL setup for EC2
@@ -280,6 +285,7 @@ Runtime configuration is centralized in `config.py` and supplied through environ
 | `UDYAM_TEST_STATE` | `ANDAMAN AND NICOBAR ISLANDS` | Test state; set to `ALL` or empty for all states |
 | `UDYAM_MAX_WORKERS` | `3` | Parallel state workers |
 | `UDYAM_BATCH_SIZE` | `10000` | Records per API request |
+| `UDYAM_COMPACTION_MAX_ROWS` | `100000` | Maximum records per compacted state file |
 | `UDYAM_MAX_RETRIES` | `5` | Retry attempts per batch |
 | `UDYAM_CONNECT_TIMEOUT` | `30` | curl connect timeout (seconds) |
 | `UDYAM_MAX_REQUEST_TIME` | `300` | curl max request duration (seconds) |
@@ -321,11 +327,23 @@ The S3 layout mirrors the GCS layout:
 s3://<bucket>/udyam/raw/
 └── run_id=<run_id>/
     ├── manifest.jsonl
+    ├── compaction_manifest.jsonl
     ├── run_summary.json
-    └── state=<state>/batches/<batch_id>.csv
+    └── state=<state>/batches/
+        ├── <batch_id>.csv
+        └── COMPACTED_<state>_<sequence>.csv
 ```
 
 Each batch upload stores the SHA-256 in object metadata. Post-upload verification reads it back via `HeadObject` (covered by `s3:GetObject`). A resumed run verifies the remote object's presence, size, and checksum before skipping a completed batch.
+
+After extraction, Airflow runs `scripts/compact_batches.py` before the Snowflake
+loader. It verifies and streams the original batch artifacts into per-state
+CSV files capped at `UDYAM_COMPACTION_MAX_ROWS` (default 100,000 rows). The
+compacted rows carry their original batch ID, source file, and offset so RAW
+lineage and the existing per-batch ledger remain intact. Original artifacts
+are retained; compacted objects and `compaction_manifest.jsonl` are additional
+run artifacts. Re-running compaction for a completed run verifies and reuses
+the compacted artifacts.
 
 ### IAM policy for the extractor service account
 
@@ -364,10 +382,15 @@ Uses Application Default Credentials. Do not place service-account keys in the r
 
 ## Snowflake RAW Loader
 
-`scripts/load_to_snowflake.py` is an idempotent loader that reads the run manifest from the Snowflake external stage and loads each SUCCESS batch into the RAW table.
+`scripts/load_to_snowflake.py` is an idempotent loader that reads the
+compaction manifest from the Snowflake external stage when available, then
+loads each compacted file while reconciling its original batches. If no
+compaction manifest exists, it retains support for loading the original
+per-batch manifest.
 
 ```powershell
 $env:UDYAM_RUN_ID = "20260917T174515Z_4366d444"
+python scripts/compact_batches.py
 python scripts/load_to_snowflake.py
 ```
 
@@ -386,12 +409,15 @@ python scripts/load_to_snowflake.py
 | `SNOWFLAKE_INGESTION_BATCH_TABLE` | Idempotency ledger (default `INGESTION_BATCH`) |
 | `UDYAM_RUN_ID` | Run to load — must be set explicitly |
 
+**Pipeline stages:**
+1. `scripts/compact_batches.py` reads successful entries in `manifest.jsonl`, verifies each source artifact, and publishes bounded state files plus `compaction_manifest.jsonl`
+2. `scripts/load_to_snowflake.py` loads the compacted files. When no compaction manifest exists, it supports the original per-batch load path
+
 **Load flow:**
-1. Read `manifest.jsonl` for the configured `UDYAM_RUN_ID` from the external stage
-2. For each `SUCCESS` batch: check the `INGESTION_BATCH` ledger
-3. Skip if already `LOADED` with matching row count and checksum
-4. Fail closed if status is `LOADING` (ambiguous — investigate before retrying)
-5. `COPY INTO` the RAW table, verify row count, update ledger; commit both atomically
+1. Read `compaction_manifest.jsonl` for the configured `UDYAM_RUN_ID` from the external stage
+2. Check existing RAW rows and the `INGESTION_BATCH` ledger for each original batch in a compacted file
+3. Copy only batches not already present, preserving the original batch ID, file, and offset on each row
+4. Reconcile each original batch's row count and source metadata, update its ledger entry, and commit
 
 See `snowflake/part 1.sql` for the full DDL (role, user, tables, file formats).
 

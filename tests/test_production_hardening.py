@@ -75,12 +75,14 @@ def test_configuration_defaults(monkeypatch):
     monkeypatch.delenv("UDYAM_MAX_WORKERS", raising=False)
     monkeypatch.delenv("UDYAM_BATCH_SIZE", raising=False)
     monkeypatch.delenv("UDYAM_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("UDYAM_COMPACTION_MAX_ROWS", raising=False)
     monkeypatch.delenv("UDYAM_TEST_STATE", raising=False)
 
     settings = load_settings()
 
     assert settings.max_workers == 3
     assert settings.batch_size == 10000
+    assert settings.compaction_max_rows == 100000
     assert settings.max_retries == 5
     assert settings.test_state == "ANDAMAN AND NICOBAR ISLANDS"
 
@@ -88,6 +90,11 @@ def test_configuration_defaults(monkeypatch):
 def test_configuration_validation(monkeypatch):
     monkeypatch.setenv("UDYAM_MAX_WORKERS", "0")
     with pytest.raises(ValueError, match="UDYAM_MAX_WORKERS"):
+        load_settings()
+
+    monkeypatch.setenv("UDYAM_MAX_WORKERS", "3")
+    monkeypatch.setenv("UDYAM_COMPACTION_MAX_ROWS", "0")
+    with pytest.raises(ValueError, match="UDYAM_COMPACTION_MAX_ROWS"):
         load_settings()
 
 

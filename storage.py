@@ -1,6 +1,7 @@
 """Storage backends for Udyam RAW batch artifacts."""
 
 from pathlib import Path
+import shutil
 from typing import Optional
 from urllib.parse import urlparse
 import os
@@ -22,6 +23,16 @@ class LocalStorage:
         checksum: str,
     ) -> str:
         return str(local_path)
+
+    def publish_compacted_batch(
+        self,
+        local_path: Path,
+        run_id: str,
+        state: str,
+        offset: int,
+        checksum: str,
+    ) -> str:
+        return self.publish_batch(local_path, run_id, state, offset, checksum)
 
     def validate_artifact(self, manifest_record: dict, checksum_fn) -> tuple[bool, str]:
         batch_file = manifest_record.get("batch_file")
@@ -54,6 +65,16 @@ class LocalStorage:
 
     def sync_run_summary(self, run_id: str, local_path: Path) -> None:
         return None
+
+    def sync_compaction_manifest(self, run_id: str, local_path: Path) -> None:
+        return None
+
+    def download_artifact(self, batch_file: str, local_path: Path) -> None:
+        source = Path(batch_file)
+        if not source.is_file():
+            raise StorageError(f"Local batch artifact not found: {source}")
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, local_path)
 
 
 class ObjectStorage:
@@ -88,6 +109,9 @@ class ObjectStorage:
     ) -> Optional[tuple[Optional[int], Optional[str]]]:
         """Return (size, sha256 metadata), or None when the object is absent."""
 
+        raise NotImplementedError
+
+    def _download(self, object_name: str, local_path: Path) -> None:
         raise NotImplementedError
 
     def _object_name(
@@ -161,6 +185,49 @@ class ObjectStorage:
             )
 
         return uri
+
+    def publish_compacted_batch(
+        self,
+        local_path: Path,
+        run_id: str,
+        state: str,
+        offset: int,
+        checksum: str,
+    ) -> str:
+        object_name = self._object_name(
+            run_id,
+            state,
+            local_path.name,
+            batch=True,
+        )
+        existing = self._head(object_name)
+        if existing is not None:
+            size, existing_checksum = existing
+            if size and existing_checksum == checksum:
+                return self._uri(object_name)
+            raise StorageError(
+                f"{self.label} compacted artifact already exists with "
+                f"different content: {self._uri(object_name)}"
+            )
+        return self.publish_batch(
+            local_path,
+            run_id,
+            state,
+            offset,
+            checksum,
+        )
+
+    def download_artifact(self, batch_file: str, local_path: Path) -> None:
+        parsed = urlparse(batch_file)
+        if parsed.scheme != self.scheme or parsed.netloc != self.bucket_name:
+            raise StorageError(
+                f"Unexpected {self.label} artifact URI: {batch_file}"
+            )
+        object_name = parsed.path.lstrip("/")
+        if not object_name:
+            raise StorageError(f"Missing {self.label} object in {batch_file}")
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        self._download(object_name, local_path)
 
     def validate_artifact(
         self,
@@ -252,6 +319,17 @@ class ObjectStorage:
                 local_path.name,
             ),
             "application/json",
+        )
+
+    def sync_compaction_manifest(
+        self,
+        run_id: str,
+        local_path: Path,
+    ) -> None:
+        self._upload_metadata_file(
+            local_path,
+            self._object_name(run_id, "", local_path.name),
+            "application/x-ndjson",
         )
 
 
@@ -369,6 +447,14 @@ class GCSStorage(ObjectStorage):
 
         return blob.size, (blob.metadata or {}).get("sha256")
 
+    def _download(self, object_name: str, local_path: Path) -> None:
+        try:
+            self.bucket.blob(object_name).download_to_filename(str(local_path))
+        except Exception as exc:
+            raise StorageError(
+                f"GCS download failed for {self._uri(object_name)}: {exc}"
+            ) from exc
+
 
 class S3Storage(ObjectStorage):
     """Publish RAW artifacts directly to Amazon S3."""
@@ -455,6 +541,18 @@ class S3Storage(ObjectStorage):
         metadata = response.get("Metadata") or {}
 
         return response.get("ContentLength"), metadata.get("sha256")
+
+    def _download(self, object_name: str, local_path: Path) -> None:
+        try:
+            self.client.download_file(
+                self.bucket_name,
+                object_name,
+                str(local_path),
+            )
+        except Exception as exc:
+            raise StorageError(
+                f"S3 download failed for {self._uri(object_name)}: {exc}"
+            ) from exc
 
 
 def build_storage(settings):
