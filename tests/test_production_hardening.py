@@ -75,6 +75,7 @@ def test_configuration_defaults(monkeypatch):
     monkeypatch.delenv("UDYAM_MAX_WORKERS", raising=False)
     monkeypatch.delenv("UDYAM_BATCH_SIZE", raising=False)
     monkeypatch.delenv("UDYAM_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("UDYAM_COMPACTION_MAX_ROWS", raising=False)
     monkeypatch.delenv("UDYAM_TEST_STATE", raising=False)
 
     settings = load_settings()

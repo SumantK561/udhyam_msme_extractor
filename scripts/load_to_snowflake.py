@@ -27,7 +27,6 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-import snowflake.connector
 from dotenv import load_dotenv
 
 
@@ -147,6 +146,7 @@ def sql_string(value: str) -> str:
 
 def create_connection(settings: Settings):
     """Create a Snowflake connection using configured authentication."""
+    import snowflake.connector
 
     LOGGER.info(
         "Connecting to Snowflake account=%s role=%s warehouse=%s "
