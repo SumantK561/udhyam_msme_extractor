@@ -6,7 +6,7 @@ import pytest
 
 import udyam_extractor as extractor
 from config import load_settings
-from run_udyam import build_run_summary, reconcile_run
+from run_udyam import STATES, build_run_summary, reconcile_run
 
 
 class FakeLogger:
@@ -24,6 +24,11 @@ class FakeLogger:
 
     def exception(self, *args, **kwargs):
         self.messages.append(("EXCEPTION", args))
+
+
+def test_dadra_state_uses_portal_filter_name():
+    assert "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU" in STATES
+    assert "DADRA AND NAGAR HAVELI AND DAMAN AND DIU" not in STATES
 
 
 def test_run_id_is_unique():

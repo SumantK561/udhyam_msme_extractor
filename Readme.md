@@ -876,7 +876,7 @@ Verifies Python 3.10+, `curl`, required runtime directories, Python compilation,
 - **Cross-platform `curl`** — removed `.exe` suffix; extractor now runs on Linux and Windows without code changes
 - **EC2 Linux deployment** — Ubuntu 24.04, t3.micro (unlimited CPU burst), virtualenv, `screen` for long-running full-state extractions
 - **GitHub Actions CD** (`cd.yml`) — auto-deploys to EC2 on merge to `main`; pulls code, reinstalls deps, runs test suite
-- **Manual pipeline workflow** (`run-pipeline.yml`) — `workflow_dispatch` with state dropdown (all 36 states + `ALL`) and optional run ID for resuming; extract and load jobs run sequentially
+- **Manual pipeline workflow** (`run-pipeline.yml`) — `workflow_dispatch` with state dropdown (all 36 states + `ALL`) and optional run ID for resuming; runs extraction → compaction → Snowflake load → dbt → dbt docs generation, matching the Airflow pipeline stages
 - **Test isolation fix** — `test_configuration_defaults` patches `load_dotenv` to prevent `.env` contents (e.g. blank `UDYAM_TEST_STATE` on the EC2) from leaking into the test suite
 
 ### 3.0.0 — AWS migration and Snowflake RAW ingestion
