@@ -639,7 +639,7 @@ The `udyam_dbt/` project transforms raw MSME data through three Snowflake schema
 
 | Model | Grain | Strategy |
 |---|---|---|
-| `bronze_msme` | One row per raw batch record | Incremental merge on `(batch_id, source_offset)` |
+| `bronze_msme` | One row per raw batch record | Incremental merge on `(batch_id, source_offset, source_row_number)` |
 
 Casts raw VARCHAR columns to typed values — `state_code` / `district_code` → INTEGER, `pincode` → zero-padded 6-char VARCHAR, `registration_date` → DATE, `activities` → VARIANT via `TRY_PARSE_JSON`. All 14 source columns plus `bronze_loaded_at` are preserved. Null `enterprise_name` rows are kept and surface as a `warn`-severity test (2 records identified in Andaman data).
 
@@ -869,7 +869,7 @@ Verifies Python 3.10+, `curl`, required runtime directories, Python compilation,
 
 ### 3.2.0 — dbt Bronze / Silver / Gold transformation layer
 
-- **Bronze** (`bronze_msme`) — incremental model on `UDYAM.RAW.MSME`; casts all columns to typed values, zero-pads pincodes, parses activities JSON; unique key `(batch_id, source_offset)`
+- **Bronze** (`bronze_msme`) — incremental model on `UDYAM.RAW.MSME`; casts all columns to typed values, zero-pads pincodes, parses activities JSON; uses a deterministic row number within each batch so every record has a unique merge key, including exact duplicate records
 - **Silver** (`silver_msme`) — deduplicates by enterprise business key, adds `country='IND'` and `msme=1` flags, excludes null enterprise names
 - **Silver** (`silver_msme_activities`) — lateral-flattens activities VARIANT into one row per NIC 5-digit code per enterprise
 - **Gold** (`dim_geography`, `dim_nic_code`, `dim_enterprise`, `fct_registrations`) — star schema with MD5 surrogate keys and FK relationship tests
