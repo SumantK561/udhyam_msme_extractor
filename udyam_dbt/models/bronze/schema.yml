@@ -42,6 +42,10 @@ models:
         description: "S3 source object path"
       - name: source_offset
         description: "Batch offset"
+      - name: source_row_number
+        description: "Deterministic row number within the source batch; part of the incremental merge key."
+        data_tests:
+          - not_null
       - name: ingested_at
         description: "Snowflake ingestion timestamp"
         data_tests:
