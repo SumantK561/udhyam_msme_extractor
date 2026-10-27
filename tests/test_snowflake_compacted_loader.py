@@ -102,9 +102,9 @@ class FakeCursor:
                 ]
             else:
                 self.current_rows = []
-        elif "COPY INTO" in sql:
+        elif "INSERT INTO" in sql:
             self.copy_executed = True
-            self.current_rows = [("Copy executed with 0 files processed.",)]
+            self.current_rows = []
         elif "MERGE INTO" in sql:
             self.ledger_merge = (sql, params)
             self.current_rows = []
@@ -116,7 +116,7 @@ class FakeCursor:
         return self.current_rows
 
 
-def test_compacted_copy_maps_embedded_batch_metadata():
+def test_compacted_insert_maps_embedded_batch_metadata():
     cursor = FakeCursor()
     record = _compact_record()
     copy_compacted_file(cursor, _settings(), record, record["batches"])
@@ -125,6 +125,7 @@ def test_compacted_copy_maps_embedded_batch_metadata():
     assert "t.$10" in sql
     assert "t.$11" in sql
     assert "t.$12" in sql
+    assert sql.lstrip().startswith("INSERT INTO")
     assert "WHERE t.$10 IN (%s)" in sql
     assert params == ("RUN1_GOA_0",)
 
