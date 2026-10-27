@@ -61,6 +61,28 @@ async function loadNicCodes() {
   }
 }
 
+async function loadEnterpriseCount() {
+  const subtitle = document.getElementById("hero-subtitle");
+  try {
+    const res = await fetch(`${API_BASE}/analytics/summary`);
+    if (!res.ok) {
+      throw new Error(`Enterprise summary request failed: HTTP ${res.status}`);
+    }
+    const { total_enterprises: total } = await res.json();
+    if (!Number.isSafeInteger(total) || total < 0) {
+      throw new Error("Enterprise summary returned an invalid total");
+    }
+
+    const count = total >= 1_000_000
+      ? `${Math.floor(total / 1_000_000).toLocaleString("en-IN")}M+`
+      : total.toLocaleString("en-IN");
+    subtitle.textContent =
+      `Search and explore ${count} registered MSME enterprises across India`;
+  } catch (error) {
+    console.error("Could not load enterprise count for page subtitle:", error);
+  }
+}
+
 async function loadDistricts(stateName) {
   els.districtSelect.innerHTML = '<option value="">All districts</option>';
   if (!stateName) {
@@ -308,6 +330,7 @@ async function loadDataFreshness() {
 
 loadStates();
 loadNicCodes();
+loadEnterpriseCount();
 loadDataFreshness();
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
