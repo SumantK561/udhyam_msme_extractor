@@ -150,6 +150,14 @@ class ObjectStorage:
             local_path.name,
             batch=True,
         )
+        return self._publish_batch_to_object(local_path, object_name, checksum)
+
+    def _publish_batch_to_object(
+        self,
+        local_path: Path,
+        object_name: str,
+        checksum: str,
+    ) -> str:
         uri = self._uri(object_name)
 
         self._upload(
@@ -194,10 +202,13 @@ class ObjectStorage:
         offset: int,
         checksum: str,
     ) -> str:
+        content_addressed_name = (
+            f"{local_path.stem}_{checksum}{local_path.suffix}"
+        )
         object_name = self._object_name(
             run_id,
             state,
-            local_path.name,
+            content_addressed_name,
             batch=True,
         )
         existing = self._head(object_name)
@@ -209,13 +220,7 @@ class ObjectStorage:
                 f"{self.label} compacted artifact already exists with "
                 f"different content: {self._uri(object_name)}"
             )
-        return self.publish_batch(
-            local_path,
-            run_id,
-            state,
-            offset,
-            checksum,
-        )
+        return self._publish_batch_to_object(local_path, object_name, checksum)
 
     def download_artifact(self, batch_file: str, local_path: Path) -> None:
         parsed = urlparse(batch_file)

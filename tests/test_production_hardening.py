@@ -326,6 +326,38 @@ def test_s3_object_layout_and_uri():
     )
 
 
+def test_compacted_object_paths_are_content_addressed(tmp_path):
+    from storage import S3Storage
+
+    backend = S3Storage.__new__(S3Storage)
+    backend.bucket_name = "test-bucket"
+    backend.prefix = "udyam/raw"
+    objects = {}
+    backend._head = objects.get
+
+    def upload(local_path, object_name, *, checksum=None, **_kwargs):
+        objects[object_name] = (local_path.stat().st_size, checksum)
+
+    backend._upload = upload
+
+    first_path = tmp_path / "TAMIL_NADU_00000.csv"
+    first_path.write_text("first output", encoding="utf-8")
+    first_checksum = extractor.calculate_file_sha256(first_path)
+    first_uri = backend.publish_compacted_batch(
+        first_path, "RUN1", "TAMIL NADU", 0, first_checksum
+    )
+
+    first_path.write_text("different output", encoding="utf-8")
+    second_checksum = extractor.calculate_file_sha256(first_path)
+    second_uri = backend.publish_compacted_batch(
+        first_path, "RUN1", "TAMIL NADU", 0, second_checksum
+    )
+
+    assert first_uri != second_uri
+    assert first_checksum in first_uri
+    assert second_checksum in second_uri
+
+
 def _fake_object_store(backend_cls, objects):
     """Build a backend whose _head reads from an in-memory object map."""
     backend = backend_cls.__new__(backend_cls)
