@@ -420,6 +420,10 @@ python scripts/load_to_snowflake.py
 4. Reconcile each original batch's row count and source metadata, update its ledger entry, and commit
 
 See `snowflake/part 1.sql` for the full DDL (role, user, tables, file formats).
+The CSV file format sets `ESCAPE_UNENCLOSED_FIELD = NONE` to preserve literal
+backslashes before delimiters, matching Python's CSV writer. Apply the ALTER
+statement in that DDL to existing Snowflake deployments; `CREATE IF NOT EXISTS`
+alone does not update an already-created file format.
 
 ---
 
