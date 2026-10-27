@@ -742,7 +742,7 @@ def copy_compacted_file(
     )
     stage_name = quote_identifier(settings.stage)
     sql = f"""
-        COPY INTO {raw_table}
+        INSERT INTO {raw_table}
         (
             LG_ST_CODE,
             STATE,
@@ -760,34 +760,29 @@ def copy_compacted_file(
             _SOURCE_OFFSET,
             _INGESTED_AT
         )
-        FROM (
-            SELECT
-                t.$1, t.$2, t.$3, t.$4, t.$5, t.$6, t.$7, t.$8, t.$9,
-                {sql_string(run_id)},
-                {sql_string(state)},
-                t.$10,
-                t.$11,
-                t.$12,
-                CURRENT_TIMESTAMP()
-            FROM @{stage_name}
-            (
-                FILE_FORMAT => 'UDYAM_CSV_FORMAT',
-                PATTERN => {sql_string(pattern)}
-            ) t
-            WHERE t.$10 IN ({placeholders})
-        )
+        SELECT
+            t.$1, t.$2, t.$3, t.$4, t.$5, t.$6, t.$7, t.$8, t.$9,
+            {sql_string(run_id)},
+            {sql_string(state)},
+            t.$10,
+            t.$11,
+            t.$12,
+            CURRENT_TIMESTAMP()
+        FROM @{stage_name}
+        (
+            FILE_FORMAT => 'UDYAM_CSV_FORMAT',
+            PATTERN => {sql_string(pattern)}
+        ) t
+        WHERE t.$10 IN ({placeholders})
     """
     LOGGER.info(
-        "COPY compact_file=%s state=%s batches=%d rows=%d",
+        "INSERT compact_file=%s state=%s batches=%d rows=%d",
         compact_record["batch_file"],
         state,
         len(batches_to_load),
         sum(int(batch["record_count"]) for batch in batches_to_load),
     )
     cursor.execute(sql, tuple(batch_ids))
-    results = cursor.fetchall()
-    for result in results:
-        LOGGER.info("COPY compact result: %s", result)
 
 
 def process_compacted_file(
