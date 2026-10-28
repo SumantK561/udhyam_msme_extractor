@@ -63,7 +63,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 120m
+          command_timeout: 1440m
           script: |
             cd ~/udhyam_msme_extractor
             source .venv/bin/activate
